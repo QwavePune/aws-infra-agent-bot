@@ -2,6 +2,7 @@ import os
 import keyring
 from dotenv import load_dotenv
 from langchain_perplexity import ChatPerplexity
+from langchain_core.messages import HumanMessage, AIMessage
 
 # Load environment variables from .env file as fallback
 load_dotenv()
@@ -87,11 +88,57 @@ llm = ChatPerplexity(
     temperature=0
 )
 
-# Simple example - invoke the LLM directly
+# Interactive query loop with conversation history
 print("=" * 50)
-print("Running agent with Perplexity API")
+print("LangChain Perplexity Agent - Conversational")
 print("=" * 50)
+print("Type 'quit', 'exit', 'q', or 'x' to exit")
+print("Type 'clear' to reset conversation history")
+print("=" * 50)
+print()
 
-response = llm.invoke("What is 87 * 45? And write a short poem about calculators.")
-print("\nFINAL RESULT:")
-print(response.content)
+# Store conversation history
+conversation_history = []
+
+while True:
+    try:
+        user_query = input("You: ").strip()
+        
+        # Check for exit commands
+        if user_query.lower() in ["quit", "exit", "q", "x"]:
+            print("\n👋 Goodbye!")
+            break
+        
+        # Check for clear history command
+        if user_query.lower() == "clear":
+            conversation_history = []
+            print("✅ Conversation history cleared\n")
+            continue
+        
+        if not user_query:
+            print("❌ Error: Query cannot be empty\n")
+            continue
+        
+        # Add user message to history
+        conversation_history.append(HumanMessage(content=user_query))
+        
+        print("\n🔄 Processing your query...")
+        print("-" * 50)
+        
+        # Invoke with full conversation history
+        response = llm.invoke(conversation_history)
+        
+        # Add AI response to history
+        conversation_history.append(AIMessage(content=response.content))
+        
+        print()
+        print("Agent:")
+        print("-" * 50)
+        print(response.content)
+        print()
+        
+    except KeyboardInterrupt:
+        print("\n\n👋 Interrupted by user. Goodbye!")
+        break
+    except Exception as e:
+        print(f"\n❌ Error: {e}\n")

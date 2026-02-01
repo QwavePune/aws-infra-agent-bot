@@ -1,1 +1,14 @@
+.env.agent-session.log
+# Logs
+*.log
+.agent-session.log
+
+# Virtualenv
+venv/
 .env
+
+# Model / cache junk
+__pycache__/
+.cache/
+.langchain/
+.agent/

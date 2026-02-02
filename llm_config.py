@@ -10,6 +10,8 @@ import keyring
 import logging
 from typing import Optional
 
+from requests import session
+
 # Configure logger for this module
 logger = logging.getLogger(__name__)
 
@@ -126,12 +128,19 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         elif preferred_source == "aws":
             try:
                 import boto3
-                
-                aws_region = os.getenv("AWS_REGION")
+                import os
+                session = boto3.Session()
+
+                aws_region = (
+                    session.region_name
+                    or os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                )
+
                 if not aws_region:
-                    raise ValueError("AWS_REGION not set in environment")
-                
-                client = boto3.client("secretsmanager", region_name=aws_region)
+                    raise ValueError("AWS region could not be resolved")
+
+                client = session.client("secretsmanager", region_name=aws_region)
                 secret = client.get_secret_value(SecretId=secret_name)
                 api_key = secret.get("SecretString")
                 if api_key:
@@ -166,7 +175,24 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
             raise ValueError(f"Unknown preferred source: {preferred_source}. Choose from: local, azure, aws, env, dotenv")
     
     # Default behavior: try all sources in order
-    # 1. Try local keyring
+    
+    # 1. Try environment variable (Fastest check)
+    if env_var:
+        api_key = os.getenv(env_var)
+        if api_key:
+            logger.info(f"Credential Source: Environment variable (Variable: {env_var})")
+            print(f"[INFO] API key retrieved from: Environment variable ({env_var})")
+            return api_key
+
+    # 2. Try .env file
+    if env_var:
+        # Re-check in case load_dotenv happend differently or just to be safe/consistent with logic
+        api_key = os.getenv(env_var)
+        if api_key:
+             # This block is redundant if os.getenv handles it, but keeping logic structure
+            pass
+
+    # 3. Try Local Keyring
     try:
         api_key = keyring.get_password(service_name, provider)
         if api_key:
@@ -177,7 +203,7 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         logger.debug(f"Local keyring check failed: {str(e)}")
         pass
     
-    # 2. Try Azure KeyVault
+    # 4. Try Azure KeyVault
     try:
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
@@ -195,7 +221,7 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         logger.debug(f"Azure KeyVault check failed: {str(e)}")
         pass
     
-    # 3. Try AWS Secrets Manager
+    # 5. Try AWS Secrets Manager
     try:
         import boto3
         
@@ -223,22 +249,6 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
     except Exception as e:
         logger.debug(f"AWS Secrets Manager check failed: {str(e)}")
         pass
-    
-    # 4. Try .env file
-    if env_var:
-        api_key = os.getenv(env_var)
-        if api_key:
-            logger.info(f"Credential Source: .env file (Variable: {env_var})")
-            print(f"[INFO] API key retrieved from: .env file ({env_var})")
-            return api_key
-    
-    # 5. Try environment variable (already covered above, but be explicit)
-    if env_var:
-        api_key = os.getenv(env_var)
-        if api_key:
-            logger.info(f"Credential Source: Environment variable (Variable: {env_var})")
-            print(f"[INFO] API key retrieved from: Environment variable ({env_var})")
-            return api_key
     
     logger.warning(f"No API key found for provider '{provider}' in any credential source")
     return None

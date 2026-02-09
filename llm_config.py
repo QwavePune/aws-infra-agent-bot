@@ -174,25 +174,10 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         else:
             raise ValueError(f"Unknown preferred source: {preferred_source}. Choose from: local, azure, aws, env, dotenv")
     
-    # Default behavior: try all sources in order
-    
-    # 1. Try environment variable (Fastest check)
-    if env_var:
-        api_key = os.getenv(env_var)
-        if api_key:
-            logger.info(f"Credential Source: Environment variable (Variable: {env_var})")
-            print(f"[INFO] API key retrieved from: Environment variable ({env_var})")
-            return api_key
+    # Default behavior: try all sources in order of priority:
+    # 1. Local Keyring -> 2. Azure KeyVault -> 3. AWS Secrets Manager -> 4. .env/Environment Variables
 
-    # 2. Try .env file
-    if env_var:
-        # Re-check in case load_dotenv happend differently or just to be safe/consistent with logic
-        api_key = os.getenv(env_var)
-        if api_key:
-             # This block is redundant if os.getenv handles it, but keeping logic structure
-            pass
-
-    # 3. Try Local Keyring
+    # 1. Try Local Keyring
     try:
         api_key = keyring.get_password(service_name, provider)
         if api_key:
@@ -202,8 +187,8 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
     except Exception as e:
         logger.debug(f"Local keyring check failed: {str(e)}")
         pass
-    
-    # 4. Try Azure KeyVault
+
+    # 2. Try Azure KeyVault
     try:
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
@@ -221,7 +206,7 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         logger.debug(f"Azure KeyVault check failed: {str(e)}")
         pass
     
-    # 5. Try AWS Secrets Manager
+    # 3. Try AWS Secrets Manager
     try:
         import boto3
         
@@ -249,7 +234,15 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
     except Exception as e:
         logger.debug(f"AWS Secrets Manager check failed: {str(e)}")
         pass
-    
+
+    # 4. Try environment variable / .env file
+    if env_var:
+        api_key = os.getenv(env_var)
+        if api_key:
+            logger.info(f"Credential Source: Environment Variable (Variable: {env_var})")
+            print(f"[INFO] API key retrieved from: Environment variable ({env_var})")
+            return api_key
+
     logger.warning(f"No API key found for provider '{provider}' in any credential source")
     return None
 

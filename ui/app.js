@@ -4,6 +4,7 @@ const promptInput = document.getElementById("promptInput");
 const sendBtn = document.getElementById("sendBtn");
 const statusMeta = document.getElementById("statusMeta");
 const modelSelect = document.getElementById("modelSelect");
+const mcpSelect = document.getElementById("mcpSelect");
 const threadIdLabel = document.getElementById("threadId");
 const providerLabel = document.getElementById("providerLabel");
 const latencyLabel = document.getElementById("latencyLabel");
@@ -120,11 +121,13 @@ const sendMessage = async (message) => {
   promptInput.style.height = "auto";
 
   const [provider, model] = modelSelect.value.split(MODEL_SEPARATOR);
+  const mcpServer = mcpSelect.value;
   const payload = {
     message: trimmed,
     threadId,
     provider,
     model,
+    mcpServer,
   };
 
   setStatus("Running");
@@ -164,6 +167,11 @@ const sendMessage = async (message) => {
     if (event.type === "TEXT_MESSAGE_END") {
       currentAssistantBubble = null;
     }
+    if (event.type === "TOOL_RESULT") {
+      const toolBubble = addMessage("assistant", "");
+      toolBubble.innerHTML = `<strong>Tool: ${event.toolName}</strong><br><pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; font-family: 'Consolas', 'Monaco', monospace;">${JSON.stringify(event.result, null, 2)}</pre>`;
+      chatStream.scrollTop = chatStream.scrollHeight;
+    }
     if (event.type === "RUN_ERROR") {
       addMessage("assistant", event.message || "Agent error");
     }
@@ -191,5 +199,60 @@ promptInput.addEventListener("input", () => {
   promptInput.style.height = "auto";
   promptInput.style.height = `${promptInput.scrollHeight}px`;
 });
+
+// AWS Login & Identity Handling
+const awsLoginBtn = document.getElementById("awsLoginBtn");
+const awsConsoleBtn = document.getElementById("awsConsoleBtn");
+const awsIdentity = document.getElementById("awsIdentity");
+const awsAccountLabel = document.getElementById("awsAccount");
+
+const refreshAwsIdentity = async () => {
+  try {
+    const response = await fetch("/api/aws/identity");
+    const data = await response.json();
+    if (data.active) {
+      awsIdentity.style.display = "flex";
+      awsAccountLabel.textContent = `AWS: ${data.account}`;
+      awsLoginBtn.textContent = "Refresh CLI";
+      awsLoginBtn.classList.remove("btn-primary");
+      awsLoginBtn.classList.add("btn-secondary");
+    } else {
+      awsIdentity.style.display = "none";
+      awsLoginBtn.textContent = "CLI Login";
+      awsLoginBtn.classList.remove("btn-secondary");
+      awsLoginBtn.classList.add("btn-primary");
+    }
+  } catch (error) {
+    console.error("Failed to fetch AWS identity", error);
+  }
+};
+
+awsConsoleBtn.addEventListener("click", () => {
+  window.open("https://console.aws.amazon.com", "_blank");
+});
+
+awsLoginBtn.addEventListener("click", async () => {
+  awsLoginBtn.disabled = true;
+  awsLoginBtn.textContent = "Launching...";
+  try {
+    const response = await fetch("/api/aws/login", { method: "POST" });
+    const data = await response.json();
+    if (data.success) {
+      alert("CLI Login process started! Please check your terminal or browser.");
+      addMessage("assistant", "AWS CLI Login initiated. If no browser tab opened automatically, please run 'aws sso login' in your Mac terminal.");
+    } else {
+      alert(data.error || "Failed to trigger login");
+    }
+  } catch (error) {
+    alert("Error triggering login");
+  } finally {
+    awsLoginBtn.disabled = false;
+    awsLoginBtn.textContent = "Refresh CLI";
+  }
+});
+
+// Refresh identity every 30 seconds
+setInterval(refreshAwsIdentity, 30000);
+refreshAwsIdentity();
 
 loadModels();

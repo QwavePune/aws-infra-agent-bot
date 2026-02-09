@@ -1,99 +1,117 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AWS Infra Agent Bot - AG-UI Console</title>
-    <link rel="stylesheet" href="/static/app.css" />
-  </head>
-  <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="brand">
-          <span class="brand-mark">AWS Infra Agent</span>
-          <span class="brand-sub">AG-UI Console</span>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AWS Infra Agent Bot - AG-UI Console</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">AWS Infra Agent</span>
+        <span class="brand-sub">AG-UI Console</span>
+      </div>
+      <div class="topbar-actions">
+        <div class="model-picker">
+          <label for="modelSelect">Model</label>
+          <select id="modelSelect"></select>
         </div>
-        <div class="topbar-actions">
-          <div class="model-picker">
-            <label for="modelSelect">Model</label>
-            <select id="modelSelect"></select>
+        <div class="model-picker">
+          <label for="mcpSelect">MCP Server</label>
+          <select id="mcpSelect">
+            <option value="none">None</option>
+            <option value="aws_terraform" selected>AWS Infrastructure (Terraform)</option>
+          </select>
+        </div>
+        <div class="model-picker">
+          <button id="awsLoginBtn" class="btn-primary">CLI Login</button>
+          <button id="awsConsoleBtn" class="btn-secondary">AWS Console</button>
+        </div>
+        <div id="awsIdentity" class="status-pill"
+          style="display: none; background: #232f3e; color: white; border: none;">
+          <span id="awsAccount">AWS: ---</span>
+        </div>
+        <div class="profile">
+          <div class="avatar">PK</div>
+          <div class="profile-meta">
+            <span class="profile-name">Parag</span>
+            <span class="profile-role">Owner</span>
           </div>
-          <div class="profile">
-            <div class="avatar">PK</div>
-            <div class="profile-meta">
-              <span class="profile-name">Parag</span>
-              <span class="profile-role">Owner</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="chat-panel">
+        <div class="status-row">
+          <div class="status-pill">Live agent session</div>
+          <div class="status-meta" id="statusMeta">Idle</div>
+        </div>
+
+        <div class="chat-stream" id="chatStream">
+          <div class="message assistant">
+            <div class="message-meta">Assistant</div>
+            <div class="message-body">
+              Welcome back. Ask me anything about AWS infra, guardrails, or deployments.
             </div>
           </div>
         </div>
-      </header>
 
-      <main class="layout">
-        <section class="chat-panel">
-          <div class="status-row">
-            <div class="status-pill">Live agent session</div>
-            <div class="status-meta" id="statusMeta">Idle</div>
+        <form class="composer" id="composer">
+          <div class="composer-input">
+            <textarea id="promptInput" rows="1" placeholder="Search or ask a question..."></textarea>
+            <button type="submit" id="sendBtn">Send</button>
           </div>
-
-          <div class="chat-stream" id="chatStream">
-            <div class="message assistant">
-              <div class="message-meta">Assistant</div>
-              <div class="message-body">
-                Welcome back. Ask me anything about AWS infra, guardrails, or deployments.
-              </div>
-            </div>
+          <div class="composer-hints">
+            Shift + Enter for newline · AG-UI streaming enabled
           </div>
+        </form>
+      </section>
 
-          <form class="composer" id="composer">
-            <div class="composer-input">
-              <textarea id="promptInput" rows="1" placeholder="Search or ask a question..."></textarea>
-              <button type="submit" id="sendBtn">Send</button>
-            </div>
-            <div class="composer-hints">
-              Shift + Enter for newline · AG-UI streaming enabled
-            </div>
-          </form>
-        </section>
+      <aside class="side-panel">
+        <div class="side-section">
+          <h3>Quick Menu</h3>
+          <ul class="menu-list">
+            <li>Runbooks</li>
+            <li>Stacks</li>
+            <li>Credentials</li>
+            <li>Audit Logs</li>
+            <li>Cost Signals</li>
+          </ul>
+        </div>
 
-        <aside class="side-panel">
-          <div class="side-section">
-            <h3>Quick Menu</h3>
-            <ul class="menu-list">
-              <li>Runbooks</li>
-              <li>Stacks</li>
-              <li>Credentials</li>
-              <li>Audit Logs</li>
-              <li>Cost Signals</li>
-            </ul>
+        <div class="side-section">
+          <h3>Session</h3>
+          <div class="card">
+            <div class="card-label">Thread</div>
+            <div class="card-value" id="threadId">...</div>
           </div>
-
-          <div class="side-section">
-            <h3>Session</h3>
-            <div class="card">
-              <div class="card-label">Thread</div>
-              <div class="card-value" id="threadId">...</div>
-            </div>
-            <div class="card">
-              <div class="card-label">Provider</div>
-              <div class="card-value" id="providerLabel">...</div>
-            </div>
-            <div class="card">
-              <div class="card-label">Latency</div>
-              <div class="card-value" id="latencyLabel">--</div>
-            </div>
+          <div class="card">
+            <div class="card-label">Provider</div>
+            <div class="card-value" id="providerLabel">...</div>
           </div>
-
-          <div class="side-section">
-            <h3>Notes</h3>
-            <p class="side-note">
-              This UI speaks AG-UI events over SSE, giving you streaming updates, run metadata, and
-              consistent agent telemetry.
-            </p>
+          <div class="card">
+            <div class="card-label">Latency</div>
+            <div class="card-value" id="latencyLabel">--</div>
           </div>
-        </aside>
-      </main>
-    </div>
+        </div>
 
-    <script src="/static/app.js"></script>
-  </body>
+        <div class="side-section">
+          <h3>Notes</h3>
+          <p class="side-note">
+            This UI speaks AG-UI events over SSE, giving you streaming updates, run metadata, and
+            consistent agent telemetry.
+          </p>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
 </html>

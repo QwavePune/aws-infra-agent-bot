@@ -5,22 +5,22 @@ This guide documents the core CLI components and configuration logic of the AWS 
 ---
 
 ## 🗝️ `setup_keychain.py`
-The **Credential Setup Utility**. This script allows you to securely store your LLM API keys (Perplexity, Anthropic, OpenAI, etc.) in various encrypted storage backends instead of hardcoding them or leaving them in plain text.
+The **Credential Setup Utility**. This script allows you to securely store your LLM API keys (Anthropic, OpenAI, Gemini, etc.) in various encrypted storage backends instead of hardcoding them or leaving them in plain text.
 
 ### Usage
-Run the script and follow the interactive prompts:
+Run the script and follow the interactive prompts to select your provider and storage backend:
 ```bash
 python3 setup_keychain.py
 ```
 
 ### Storage Options:
 1.  **Local Keyring (Recommended for Local Dev)**: Uses your OS-native encrypted store (macOS Keychain, Windows Credential Manager, or Linux Secret Service).
-2.  **Azure KeyVault**: Stores keys in a cloud-based Azure KeyVault. requires `AZURE_KEYVAULT_URL` in `.env`.
-3.  **AWS Secrets Manager**: Stores keys in AWS Secrets Manager. Requires `AWS_REGION` in `.env`.
+2.  **Azure KeyVault**: Stores keys in a cloud-based Azure KeyVault. Requires `AZURE_KEYVAULT_URL` in `.env` (or you can enter it during setup).
+3.  **AWS Secrets Manager**: Stores keys in AWS Secrets Manager. Requires `AWS_REGION` in `.env` (or you can enter it during setup).
 
 ### Commands:
-- `python3 setup_keychain.py local` - Setup local keyring only.
-- `python3 setup_keychain.py verify` - Check if keys are correctly stored and accessible.
+- `python3 setup_keychain.py` - Interactive setup (recommended).
+- `python3 setup_keychain.py verify` - Check which keys are currently stored and accessible.
 
 ---
 

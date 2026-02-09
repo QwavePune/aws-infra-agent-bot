@@ -41,7 +41,8 @@ except ImportError as e:
     logger_temp.warning(f"MCP Server not available: {e}")
     aws_mcp = None
 
-APP_ROOT = "/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot"
+# Get the absolute path of the directory where this script is located
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # Configure logging
 LOG_FILE = os.path.join(APP_ROOT, 'agui-server.log')

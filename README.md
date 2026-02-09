@@ -18,7 +18,7 @@ The primary goal of this project is to empower users to build and manage complex
 - **Real-time Streaming:** Uses Server-Sent Events (SSE) for a responsive, interactive chat experience.
 - **Integrated AWS Login:** Dedicated buttons for CLI authentication and direct AWS Console access.
 - **Model & MCP Picker:** Switch between different LLM providers (Anthropic, OpenAI, Gemini) and MCP servers on the fly.
-- **Premium Aesthetics:** A modern, dark-themed UI built with Calibri typography and a productivity-focused layout.
+- **Premium Aesthetics:** A modern, professional light-themed UI built with Calibri typography and a productivity-focused layout.
 
 ### 🔒 Enterprise-Grade Security
 - **Multi-Source Credentials:** Supports Local Keyring (macOS Keychain), Azure KeyVault, and AWS Secrets Manager.
@@ -85,7 +85,7 @@ The primary goal of this project is to empower users to build and manage complex
 - `mcp_servers/`: Contains the AWS/Terraform MCP server implementation.
 - `ui/`: Modern web frontend (HTML/JS/CSS).
 - `llm_config.py`: Centralized LLM and credential management.
-- `terraform_workspace/`: Local directory where the agent generates and manages IaC code.
+- `terraform_workspace/`: (Generated) Local directory where the agent generates and manages IaC code.
 
 ---
 

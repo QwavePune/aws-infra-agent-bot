@@ -98,7 +98,7 @@ safety check  # Dependency vulnerabilities
 ## Project-Specific Conventions
 
 ### File Organization
-- **Core agents:** `langchain-*.py` files (main agent is `langchain-agent.py`, groq variant in `langchain-groq.py`)
+- **Core agents:** `langchain-*.py` files (main agent is `langchain-agent.py`)
 - **Configuration:** `llm_config.py` (all LLM logic), `setup_keychain.py` (credential setup)
 - **Scripts:** `scripts/` contains shell automation (always uses venv's python)
 - **Tests:** `tests/` for unit tests, `tests/integration/` for AWS integration tests
@@ -150,7 +150,6 @@ except Exception as e:
 - **Utilities:** python-dotenv (environment loading), invoke/fabric (task automation)
 
 ## Testing Notes
-- `langchain-groq.py` is a standalone test agent with a calculator tool (not integrated into main agent)
 - For credential testing: `python3 setup_keychain.py` then `python3 langchain-agent.py` with interactive LLM selection
 - For environment checks: `python3 check_env.py` scans for API key environment variables
 - Unit tests in `tests/test_llm_config.py` validate provider initialization and credential retrieval

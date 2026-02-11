@@ -43,16 +43,13 @@ cp .env.example .env
 ### Setup Storage
 
 ```bash
-# Interactive setup (choose local keyring or Azure KeyVault)
+# Interactive setup (choose provider, then storage backend)
 python3 setup_keychain.py
 
-# Setup local keyring directly
+# Setup local keyring directly (will prompt for provider)
 python3 setup_keychain.py local
 
-# Setup Azure KeyVault directly
-python3 setup_keychain.py azure
-
-# Verify which method is configured
+# Verify which methods are configured for ALL providers
 python3 setup_keychain.py verify
 ```
 

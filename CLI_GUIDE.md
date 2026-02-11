@@ -38,22 +38,24 @@ The **Configuration Engine**. This module is the "brain" for LLM management. It 
 ---
 
 ## 🤖 `langchain-agent.py`
-The **Interactive CLI Agent**. A robust terminal-based interface for chatting with your configured LLMs.
+The **AWS Infrastructure CLI Agent**. A robust terminal-based counterpart to the AG-UI, capable of full infrastructure management.
 
 ### Features:
-- **Multi-turn Conversation**: Remembers previous messages in the session.
-- **Provider Switching**: Choose which AI model to talk to at startup.
-- **Session Logging**: Automatically saves a transcript of your session to `.agent-session.log`.
+- **Full Tool Support**: Can generate, plan, and apply Terraform configurations directly from the terminal.
+- **Tool-Calling Loop**: Handles iterative reasoning (up to 5 turns) to resolve complex infrastructure requests.
+- **Identity Awareness**: Verifies AWS Account ID and ARN at startup to ensure your session is active.
+- **Environment Aware**: Option to select/change your `AWS_PROFILE` at startup.
 
 ### Usage:
 1. **Start the agent**:
    ```bash
    python3 langchain-agent.py
    ```
-2. **Commands within the chat**:
-   - `help`: Show available commands.
-   - `clear`: Reset the current conversation history.
-   - `quit` or `exit`: Safely end the session.
+2. **Setup**: Follow the interactive prompts to confirm your AWS profile and LLM provider.
+3. **Infrastructure Management**:
+   - Talk to it like a DevOps engineer: *"Deploy an RDS database for my app."*
+   - Monitor the `🛠️` and `✅` status icons as it executes MCP tools.
+   - Use `terraform_apply` through the agent to ship your changes.
 
 ### Environment Shortcuts:
 You can skip the interactive selection by setting an environment variable:

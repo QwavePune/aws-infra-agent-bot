@@ -3,10 +3,14 @@
 This project now includes a Model Context Protocol (MCP) server for AWS Infrastructure provisioning via Terraform.
 
 ## Features
-- **Natural Language Infrastructure**: "Create an m5.large instance in us-west-2"
+- **Natural Language Infrastructure**: "Deploy a production-grade VPC and an RDS database."
 - **RBAC Integration**: Automatically checks your AWS IAM permissions using the IAM Policy Simulator.
-- **Terraform Automation**: Handles the full lifecycle of infrastructure (Init -> Plan -> Apply).
-- **Pre-built Templates**: Optimized patterns for EC2, S3, and VPC.
+- **Robust Terraform Automation**: Inherits your active shell's environment for seamless `terraform apply`.
+- **Production-Grade Templates**: 
+  - **Multi-AZ VPC**: Optimized network layout with public/private subnets.
+  - **RDS PostgreSQL**: Managed database provisioning with security defaults.
+  - **AWS Lambda**: Automated function creation including boilerplate code and IAM roles.
+  - **EC2 with Security Groups**: Automatic firewall provisioning for SSH and HTTP.
 
 ## Prerequisites
 1. **Terraform CLI**: Must be installed and available in the system PATH.

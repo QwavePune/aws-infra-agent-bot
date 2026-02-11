@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script to securely store Perplexity API key in:
+Setup script to securely store API keys for different LLM providers in:
 1. Local system keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service)
 2. Azure KeyVault (cloud-based)
 3. AWS Secrets Manager (cloud-based)
@@ -8,7 +8,7 @@ Setup script to securely store Perplexity API key in:
 Usage:
     python3 setup_keychain.py
     
-This will prompt you to choose a storage backend and securely store your API key.
+This will prompt you to choose an LLM provider and a storage backend.
 """
 
 import keyring
@@ -16,6 +16,18 @@ import getpass
 import os
 import sys
 from pathlib import Path
+
+# Import LLM configurations to get supported providers
+try:
+    from llm_config import SUPPORTED_LLMS
+except ImportError:
+    # Minimal fallback if import fails
+    SUPPORTED_LLMS = {
+        "perplexity": {"name": "Perplexity", "requires_api_key": True},
+        "openai": {"name": "OpenAI", "requires_api_key": True},
+        "gemini": {"name": "Google Gemini", "requires_api_key": True},
+        "claude": {"name": "Anthropic Claude", "requires_api_key": True}
+    }
 
 # Azure imports (optional)
 try:
@@ -33,20 +45,43 @@ except ImportError:
     AWS_AVAILABLE = False
 
 SERVICE_NAME = "langchain-agent"
-USERNAME = "perplexity"
-SECRET_NAME = "perplexity-api-key"
 
+def select_provider():
+    """Ask the user to select an LLM provider."""
+    print("\n" + "=" * 60)
+    print("Select LLM Provider")
+    print("=" * 60)
+    
+    # Filter only providers that require an API key
+    providers = {k: v for k, v in SUPPORTED_LLMS.items() if v.get("requires_api_key", True)}
+    
+    provider_keys = list(providers.keys())
+    for i, key in enumerate(provider_keys, 1):
+        name = providers[key].get("name", key.capitalize())
+        print(f"{i}. {name}")
+    
+    print()
+    try:
+        choice = int(input(f"Enter your choice (1-{len(provider_keys)}): ").strip())
+        if 1 <= choice <= len(provider_keys):
+            selected_key = provider_keys[choice-1]
+            return selected_key, providers[selected_key].get("name", selected_key.capitalize())
+    except (ValueError, IndexError):
+        pass
+    
+    print("❌ Invalid choice")
+    sys.exit(1)
 
-def setup_local_keyring():
+def setup_local_keyring(provider_key, provider_name):
     """Securely store API key in local system keyring."""
     print("\n" + "=" * 60)
-    print("Local Keyring Setup")
+    print(f"Local Keyring Setup - {provider_name}")
     print("=" * 60)
     print()
     
     # Get API key from user
     api_key = getpass.getpass(
-        "Enter your Perplexity API key (input will be hidden): "
+        f"Enter your {provider_name} API key (input will be hidden): "
     )
     
     if not api_key:
@@ -55,21 +90,20 @@ def setup_local_keyring():
     
     try:
         # Store in local keyring
-        keyring.set_password(SERVICE_NAME, USERNAME, api_key)
+        keyring.set_password(SERVICE_NAME, provider_key, api_key)
         print()
-        print("✅ Successfully stored API key in local keyring!")
+        print(f"✅ Successfully stored {provider_name} API key in local keyring!")
         print(f"   Service: {SERVICE_NAME}")
-        print(f"   Username: {USERNAME}")
+        print(f"   Username: {provider_key}")
         print(f"   Backend: {keyring.get_keyring().__class__.__name__}")
         print()
-        print("You can now run: python3 langchain-agent.py")
         return True
     except Exception as e:
         print(f"❌ Error storing in local keyring: {e}")
         return False
 
 
-def setup_azure_keyvault():
+def setup_azure_keyvault(provider_key, provider_name):
     """Securely store API key in Azure KeyVault."""
     if not AZURE_AVAILABLE:
         print("❌ Azure packages not installed.")
@@ -77,7 +111,7 @@ def setup_azure_keyvault():
         return False
     
     print("\n" + "=" * 60)
-    print("Azure KeyVault Setup")
+    print(f"Azure KeyVault Setup - {provider_name}")
     print("=" * 60)
     print()
     
@@ -90,9 +124,11 @@ def setup_azure_keyvault():
         print("❌ Error: KeyVault URL cannot be empty")
         return False
     
+    secret_name = f"{provider_key}-api-key"
+    
     # Get API key from user
     api_key = getpass.getpass(
-        "Enter your Perplexity API key (input will be hidden): "
+        f"Enter your {provider_name} API key (input will be hidden): "
     )
     
     if not api_key:
@@ -104,38 +140,34 @@ def setup_azure_keyvault():
         credential = DefaultAzureCredential()
         client = SecretClient(vault_url=keyvault_url, credential=credential)
         
-        print("Storing secret in Azure KeyVault...")
-        client.set_secret(SECRET_NAME, api_key)
+        print(f"Storing secret '{secret_name}' in Azure KeyVault...")
+        client.set_secret(secret_name, api_key)
         
         print()
-        print("✅ Successfully stored API key in Azure KeyVault!")
+        print(f"✅ Successfully stored {provider_name} API key in Azure KeyVault!")
         print(f"   KeyVault URL: {keyvault_url}")
-        print(f"   Secret Name: {SECRET_NAME}")
+        print(f"   Secret Name: {secret_name}")
         print()
         
         # Save KeyVault URL to .env for easy access
         env_file = Path(".env")
+        env_line = f"AZURE_KEYVAULT_URL={keyvault_url}\n"
+        
         if env_file.exists():
-            with open(env_file, "a") as f:
-                f.write(f"\nAZURE_KEYVAULT_URL={keyvault_url}\n")
+            content = env_file.read_text()
+            if "AZURE_KEYVAULT_URL" not in content:
+                with open(env_file, "a") as f:
+                    f.write(f"\n{env_line}")
         else:
-            with open(env_file, "w") as f:
-                f.write(f"AZURE_KEYVAULT_URL={keyvault_url}\n")
+            env_file.write_text(env_line)
         
-        print("Saved KeyVault URL to .env")
-        print("You can now run: python3 langchain-agent.py")
         return True
-        
     except Exception as e:
         print(f"❌ Error storing in Azure KeyVault: {e}")
-        print("\nMake sure you have:")
-        print("1. Azure CLI installed and authenticated (az login)")
-        print("2. Permissions to manage secrets in the KeyVault")
-        print("3. The KeyVault URL is correct")
         return False
 
 
-def setup_aws_secrets_manager():
+def setup_aws_secrets_manager(provider_key, provider_name):
     """Securely store API key in AWS Secrets Manager."""
     if not AWS_AVAILABLE:
         print("❌ AWS packages not installed.")
@@ -143,7 +175,7 @@ def setup_aws_secrets_manager():
         return False
     
     print("\n" + "=" * 60)
-    print("AWS Secrets Manager Setup")
+    print(f"AWS Secrets Manager Setup - {provider_name}")
     print("=" * 60)
     print()
     
@@ -156,17 +188,17 @@ def setup_aws_secrets_manager():
         print("❌ Error: AWS region cannot be empty")
         return False
     
-    # Get secret name
+    default_secret_name = f"{provider_key}-api-key"
     secret_name = input(
-        f"Enter secret name (default: {SECRET_NAME}): "
+        f"Enter secret name (default: {default_secret_name}): "
     ).strip()
     
     if not secret_name:
-        secret_name = SECRET_NAME
+        secret_name = default_secret_name
     
     # Get API key from user
     api_key = getpass.getpass(
-        "Enter your Perplexity API key (input will be hidden): "
+        f"Enter your {provider_name} API key (input will be hidden): "
     )
     
     if not api_key:
@@ -175,21 +207,18 @@ def setup_aws_secrets_manager():
     
     try:
         print("\nConnecting to AWS...")
-        # Create Secrets Manager client
         client = boto3.client("secretsmanager", region_name=aws_region)
         
-        print("Storing secret in AWS Secrets Manager...")
+        print(f"Storing secret '{secret_name}' in AWS Secrets Manager...")
         
         try:
-            # Try to create the secret
             response = client.create_secret(
                 Name=secret_name,
                 SecretString=api_key,
-                Description="Perplexity API Key for LangChain Agent"
+                Description=f"{provider_name} API Key for LangChain Agent"
             )
             print(f"✅ Secret created with ARN: {response['ARN']}")
         except client.exceptions.ResourceExistsException:
-            # If secret exists, update it
             response = client.update_secret(
                 SecretId=secret_name,
                 SecretString=api_key
@@ -197,96 +226,62 @@ def setup_aws_secrets_manager():
             print(f"✅ Secret updated with ARN: {response['ARN']}")
         
         print()
-        print("✅ Successfully stored API key in AWS Secrets Manager!")
+        print(f"✅ Successfully stored {provider_name} API key in AWS Secrets Manager!")
         print(f"   Region: {aws_region}")
         print(f"   Secret Name: {secret_name}")
         print()
         
-        # Save AWS config to .env for easy access
+        # Save AWS config to .env (using provider-specific prefix if we want multiple)
         env_file = Path(".env")
-        env_content = f"AWS_REGION={aws_region}\nAWS_SECRET_NAME={secret_name}\n"
+        env_content = f"AWS_REGION={aws_region}\n{provider_key.upper()}_AWS_SECRET_NAME={secret_name}\n"
         
-        if env_file.exists():
-            with open(env_file, "a") as f:
-                f.write(f"\n{env_content}")
-        else:
-            with open(env_file, "w") as f:
-                f.write(env_content)
-        
-        print("Saved AWS config to .env")
-        print("You can now run: python3 langchain-agent.py")
+        with open(env_file, "a" if env_file.exists() else "w") as f:
+            f.write(f"\n{env_content}")
+            
         return True
-        
     except Exception as e:
         print(f"❌ Error storing in AWS Secrets Manager: {e}")
-        print("\nMake sure you have:")
-        print("1. AWS CLI configured (aws configure)")
-        print("2. AWS credentials with Secrets Manager permissions")
-        print("3. Correct region name")
         return False
 
 
 def verify_setup():
-    """Verify which storage backend is configured."""
+    """Verify which storage backends are configured for all providers."""
     print("\n" + "=" * 60)
-    print("Checking Credential Storage")
+    print("Checking Credential Storage (All Providers)")
     print("=" * 60)
     print()
     
-    # Check local keyring
-    try:
-        api_key = keyring.get_password(SERVICE_NAME, USERNAME)
-        if api_key:
-            print("✅ API key found in local keyring")
-            return True
-    except:
-        pass
+    providers_with_keys = [k for k, v in SUPPORTED_LLMS.items() if v.get("requires_api_key", True)]
     
-    # Check Azure KeyVault
-    if AZURE_AVAILABLE:
+    overall_found = False
+    for provider in providers_with_keys:
+        name = SUPPORTED_LLMS[provider].get("name", provider)
+        print(f"--- {name} ---")
+        found = False
+        
+        # Check local keyring
         try:
-            from dotenv import load_dotenv
-            load_dotenv()
-            keyvault_url = os.getenv("AZURE_KEYVAULT_URL")
-            
-            if keyvault_url:
-                credential = DefaultAzureCredential()
-                client = SecretClient(vault_url=keyvault_url, credential=credential)
-                secret = client.get_secret(SECRET_NAME)
-                if secret:
-                    print("✅ API key found in Azure KeyVault")
-                    return True
-        except:
-            pass
-    
-    # Check AWS Secrets Manager
-    if AWS_AVAILABLE:
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-            aws_region = os.getenv("AWS_REGION")
-            aws_secret_name = os.getenv("AWS_SECRET_NAME", SECRET_NAME)
-            
-            if aws_region:
-                client = boto3.client("secretsmanager", region_name=aws_region)
-                try:
-                    secret = client.get_secret_value(SecretId=aws_secret_name)
-                    if secret:
-                        print("✅ API key found in AWS Secrets Manager")
-                        return True
-                except:
-                    pass
-        except:
-            pass
-    
-    print("❌ API key not found in any storage backend")
-    return False
+            api_key = keyring.get_password(SERVICE_NAME, provider)
+            if api_key:
+                print(f"  ✅ Local Keyring: Found")
+                found = True
+        except: pass
+        
+        if not found:
+            print(f"  ❌ Not found in any local storage")
+        else:
+            overall_found = True
+        print()
+
+    return overall_found
 
 
 def main():
     """Main menu."""
+    provider_key, provider_name = select_provider()
+    
     print("\n" + "=" * 60)
-    print("Perplexity API Key - Secure Storage Setup")
+    print(f"Secure Storage Setup for {provider_name}")
     print("=" * 60)
     print()
     print("Choose where to store your API key:")
@@ -305,20 +300,18 @@ def main():
     choice = input("Enter your choice (1, 2, or 3): ").strip()
     
     if choice == "1":
-        setup_local_keyring()
+        setup_local_keyring(provider_key, provider_name)
     elif choice == "2":
         if AZURE_AVAILABLE:
-            setup_azure_keyvault()
+            setup_azure_keyvault(provider_key, provider_name)
         else:
             print("❌ Azure packages not installed")
-            print("   Install with: pip install azure-identity azure-keyvault-secrets")
             sys.exit(1)
     elif choice == "3":
         if AWS_AVAILABLE:
-            setup_aws_secrets_manager()
+            setup_aws_secrets_manager(provider_key, provider_name)
         else:
             print("❌ AWS packages not installed")
-            print("   Install with: pip install boto3")
             sys.exit(1)
     else:
         print("❌ Invalid choice")
@@ -327,16 +320,21 @@ def main():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        if sys.argv[1] == "verify":
+        cmd = sys.argv[1]
+        if cmd == "verify":
             verify_setup()
-        elif sys.argv[1] == "local":
-            setup_local_keyring()
-        elif sys.argv[1] == "azure":
-            setup_azure_keyvault()
-        elif sys.argv[1] == "aws":
-            setup_aws_secrets_manager()
         else:
-            print(f"Unknown command: {sys.argv[1]}")
-            print("Usage: python3 setup_keychain.py [verify|local|azure|aws]")
+            # For direct commands like 'python3 setup_keychain.py local', 
+            # we still need to know WHICH provider.
+            p_key, p_name = select_provider()
+            if cmd == "local":
+                setup_local_keyring(p_key, p_name)
+            elif cmd == "azure":
+                setup_azure_keyvault(p_key, p_name)
+            elif cmd == "aws":
+                setup_aws_secrets_manager(p_key, p_name)
+            else:
+                print(f"Unknown command: {cmd}")
+                print("Usage: python3 setup_keychain.py [verify|local|azure|aws]")
     else:
         main()

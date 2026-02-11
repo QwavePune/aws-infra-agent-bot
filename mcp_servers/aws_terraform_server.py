@@ -30,21 +30,33 @@ class AWSRBACManager:
     def initialize(self):
         """Initialize AWS clients and get caller identity"""
         try:
+            # Explicitly log environment context for debugging
+            profile = os.environ.get('AWS_PROFILE', 'default')
+            region = os.environ.get('AWS_REGION', os.environ.get('AWS_DEFAULT_REGION', 'not set'))
+            logger.info(f"Initializing AWS Session (Profile: {profile}, Region: {region})")
+            
             session = boto3.Session()
             self.sts_client = session.client('sts')
             self.iam_client = session.client('iam')
             self.identity = self.sts_client.get_caller_identity()
             
-            logger.info(f"AWS Identity: {self.identity}")
+            logger.info(f"AWS Identity Successfully Retreived: {self.identity.get('Arn')}")
             return True
-        except (ClientError, NoCredentialsError) as e:
-            logger.error(f"Failed to initialize AWS clients: {e}")
+        except Exception as e:
+            logger.error(f"Failed to initialize AWS clients: {str(e)}")
+            self.identity = None
             return False
     
     def get_user_info(self) -> Dict[str, Any]:
         """Get current AWS user information"""
         if not self.identity:
-            self.initialize()
+            if not self.initialize():
+                return {
+                    "account_id": "unknown (no credentials)",
+                    "user_arn": "unknown",
+                    "user_id": "unknown",
+                    "error": "Failed to initialize AWS Session"
+                }
         
         return {
             "account_id": self.identity.get("Account", "unknown"),
@@ -99,89 +111,66 @@ class TerraformManager:
         self.workspace_dir = Path(workspace_dir)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         
+    def _run_terraform(self, cmd: List[str], cwd: Path) -> Dict[str, Any]:
+        """Run terraform command with inherited environment"""
+        try:
+            # Ensure AWS credentials from the current process are passed to terraform
+            env = os.environ.copy()
+            
+            logger.info(f"Running command: {' '.join(cmd)} in {cwd}")
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=1800
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Terraform command failed: {result.stderr}")
+            
+            return {
+                "success": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode
+            }
+        except subprocess.TimeoutExpired:
+            logger.error(f"Terraform command timed out: {' '.join(cmd)}")
+            return {"success": False, "error": f"Terraform {cmd[1]} timed out"}
+        except Exception as e:
+            logger.error(f"Error running terraform: {str(e)}")
+            return {"success": False, "error": str(e)}
+
     def init(self, project_dir: str) -> Dict[str, Any]:
         """Initialize Terraform in a project directory"""
         project_path = self.workspace_dir / project_dir
         project_path.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            result = subprocess.run(
-                ["terraform", "init"],
-                cwd=project_path,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Terraform init timed out"}
-        except FileNotFoundError:
-            return {"success": False, "error": "Terraform not installed"}
+        return self._run_terraform(["terraform", "init"], project_path)
     
     def plan(self, project_dir: str, var_file: Optional[str] = None) -> Dict[str, Any]:
         """Run terraform plan"""
         project_path = self.workspace_dir / project_dir
-        
-        cmd = ["terraform", "plan", "-out=tfplan"]
+        cmd = ["terraform", "plan", "-out=tfplan", "-input=false"]
         if var_file:
             cmd.extend(["-var-file", var_file])
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=project_path,
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
-            
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Terraform plan timed out"}
+        return self._run_terraform(cmd, project_path)
     
     def apply(self, project_dir: str, auto_approve: bool = False) -> Dict[str, Any]:
         """Run terraform apply"""
         project_path = self.workspace_dir / project_dir
-        
-        cmd = ["terraform", "apply"]
         plan_file = project_path / "tfplan"
         
-        # If we have a saved plan, use it (best practice)
+        # If we have a saved plan, use it
         if plan_file.exists():
-            cmd.append("tfplan")
+            cmd = ["terraform", "apply", "-input=false", "tfplan"]
         elif auto_approve:
-            cmd.append("-auto-approve")
+            cmd = ["terraform", "apply", "-auto-approve", "-input=false"]
         else:
             return {"success": False, "error": "No tfplan file found. Please run terraform_plan first."}
         
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=project_path,
-                capture_output=True,
-                text=True,
-                timeout=1800  # 30 minutes
-            )
-            
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Terraform apply timed out"}
+        return self._run_terraform(cmd, project_path)
     
     def destroy(self, project_dir: str, auto_approve: bool = False) -> Dict[str, Any]:
         """Run terraform destroy"""
@@ -265,12 +254,39 @@ provider "aws" {{
   region = "{region}"
 }}
 
+resource "aws_security_group" "instance_sg" {{
+  name        = "allow_ssh_http"
+  description = "Allow SSH and HTTP traffic"
+
+  ingress {{
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+
+  ingress {{
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+
+  egress {{
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+}}
+
 resource "aws_instance" "main" {{
   ami           = "{ami_id}"
   instance_type = "{instance_type}"
+  vpc_security_group_ids = [aws_security_group.instance_sg.id]
   
   tags = {{
-    Name = "MCP-Provisioned-Instance"
+    Name = "Production-Instance"
     ManagedBy = "AWS-Infra-Agent-MCP"
   }}
 }}
@@ -332,7 +348,7 @@ output "bucket_arn" {{
     
     @staticmethod
     def vpc_network(cidr_block: str = "10.0.0.0/16", region: str = "us-east-1") -> str:
-        """Generate Terraform config for VPC with subnets"""
+        """Generate production-grade VPC config with public/private subnets across multiple AZs"""
         return f"""
 terraform {{
   required_providers {{
@@ -347,34 +363,41 @@ provider "aws" {{
   region = "{region}"
 }}
 
+data "aws_availability_zones" "available" {{
+  state = "available"
+}}
+
 resource "aws_vpc" "main" {{
   cidr_block           = "{cidr_block}"
   enable_dns_hostnames = true
   enable_dns_support   = true
   
   tags = {{
-    Name = "MCP-Provisioned-VPC"
+    Name = "Production-VPC"
     ManagedBy = "AWS-Infra-Agent-MCP"
   }}
 }}
 
 resource "aws_subnet" "public" {{
+  count             = 2
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, 1)
-  availability_zone = data.aws_availability_zones.available.names[0]
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
   
   tags = {{
-    Name = "MCP-Public-Subnet"
+    Name = "Public-Subnet-${{count.index + 1}}"
   }}
 }}
 
 resource "aws_subnet" "private" {{
+  count             = 2
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, 2)
-  availability_zone = data.aws_availability_zones.available.names[0]
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 2)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
   
   tags = {{
-    Name = "MCP-Private-Subnet"
+    Name = "Private-Subnet-${{count.index + 1}}"
   }}
 }}
 
@@ -382,24 +405,120 @@ resource "aws_internet_gateway" "main" {{
   vpc_id = aws_vpc.main.id
   
   tags = {{
-    Name = "MCP-IGW"
+    Name = "Production-IGW"
   }}
 }}
 
-data "aws_availability_zones" "available" {{
-  state = "available"
+resource "aws_route_table" "public" {{
+  vpc_id = aws_vpc.main.id
+  
+  route {{
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }}
+}}
+
+resource "aws_route_table_association" "public" {{
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
 }}
 
 output "vpc_id" {{
   value = aws_vpc.main.id
 }}
 
-output "public_subnet_id" {{
-  value = aws_subnet.public.id
+output "public_subnet_ids" {{
+  value = aws_subnet.public[*].id
 }}
 
-output "private_subnet_id" {{
-  value = aws_subnet.private.id
+output "private_subnet_ids" {{
+  value = aws_subnet.private[*].id
+}}
+"""
+
+    @staticmethod
+    def rds_instance(db_name: str, instance_class: str = "db.t3.micro", region: str = "us-east-1") -> str:
+        """Generate Terraform config for an RDS PostgreSQL instance"""
+        return f"""
+terraform {{
+  required_providers {{
+    aws = {{
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }}
+  }}
+}}
+
+provider "aws" {{
+  region = "{region}"
+}}
+
+resource "aws_db_instance" "default" {{
+  allocated_storage    = 20
+  db_name              = "{db_name}"
+  engine               = "postgres"
+  engine_version       = "15"
+  instance_class       = "{instance_class}"
+  username             = "adminuser"
+  password             = "REPLACE_WITH_SECURE_PASSWORD" # Agent should advise user
+  parameter_group_name = "default.postgres15"
+  skip_final_snapshot  = true
+  
+  tags = {{
+    Name = "Production-DB"
+  }}
+}}
+"""
+
+    @staticmethod
+    def lambda_function(function_name: str, region: str = "us-east-1") -> str:
+        """Generate Terraform config for a Lambda function"""
+        return f"""
+terraform {{
+  required_providers {{
+    aws = {{
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }}
+  }}
+}}
+
+provider "aws" {{
+  region = "{region}"
+}}
+
+resource "aws_iam_role" "iam_for_lambda" {{
+  name = "iam_for_lambda_${{function_name}}"
+
+  assume_role_policy = jsonencode({{
+    Version = "2012-10-17"
+    Statement = [
+      {{
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Sid    = ""
+        Principal = {{
+          Service = "lambda.amazonaws.com"
+        }}
+      }},
+    ]
+  }})
+}}
+
+resource "aws_lambda_function" "test_lambda" {{
+  filename      = "lambda_function_payload.zip"
+  function_name = "{function_name}"
+  role          = aws_iam_role.iam_for_lambda.arn
+  handler       = "index.handler"
+
+  runtime = "python3.9"
+
+  environment {{
+    variables = {{
+      foo = "bar"
+    }}
+  }}
 }}
 """
 
@@ -494,6 +613,46 @@ class MCPAWSTerraformServer:
                 }
             },
             {
+                "name": "create_rds_instance",
+                "description": "Create an RDS PostgreSQL instance using Terraform",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "db_name": {
+                            "type": "string",
+                            "description": "Database name (required)"
+                        },
+                        "instance_class": {
+                            "type": "string",
+                            "description": "RDS instance class (default: db.t3.micro)"
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region (default: us-east-1)"
+                        }
+                    },
+                    "required": ["db_name"]
+                }
+            },
+            {
+                "name": "create_lambda_function",
+                "description": "Create a Lambda function using Terraform",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "function_name": {
+                            "type": "string",
+                            "description": "Lambda function name (required)"
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region (default: us-east-1)"
+                        }
+                    },
+                    "required": ["function_name"]
+                }
+            },
+            {
                 "name": "terraform_plan",
                 "description": "Run terraform plan for a project",
                 "parameters": {
@@ -509,7 +668,7 @@ class MCPAWSTerraformServer:
             },
             {
                 "name": "terraform_apply",
-                "description": "Apply Terraform changes",
+                "description": "Apply Terraform changes (will automatically approve if a plan file exists)",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -519,7 +678,7 @@ class MCPAWSTerraformServer:
                         },
                         "auto_approve": {
                             "type": "boolean",
-                            "description": "Auto-approve changes (default: false)"
+                            "description": "Auto-approve changes (default: true if tfplan exists)"
                         }
                     },
                     "required": ["project_name"]
@@ -571,15 +730,25 @@ class MCPAWSTerraformServer:
         """Execute an MCP tool"""
         logger.info(f"Executing tool: {tool_name} with parameters: {parameters}")
         
-        # Check if user is authenticated
+        # Check if user is authenticated, try to initialize if not
         if not self.rbac.identity:
-            return {"success": False, "error": "User not authenticated"}
+            logger.info("Identity not found, attempting to initialize AWS session...")
+            if not self.rbac.initialize():
+                return {
+                    "success": False, 
+                    "error": "User not authenticated. Please ensure you are logged in via AWS CLI and have the correct AWS_PROFILE set."
+                }
+        
+        # Identity might be stale, but we'll try to use it. 
+        # The individual handlers will catch permission errors.
         
         # Route to appropriate handler
         handlers = {
             "create_ec2_instance": self._create_ec2_instance,
             "create_s3_bucket": self._create_s3_bucket,
             "create_vpc": self._create_vpc,
+            "create_rds_instance": self._create_rds_instance,
+            "create_lambda_function": self._create_lambda_function,
             "terraform_plan": self._terraform_plan,
             "terraform_apply": self._terraform_apply,
             "terraform_destroy": self._terraform_destroy,
@@ -592,6 +761,59 @@ class MCPAWSTerraformServer:
             return {"success": False, "error": f"Unknown tool: {tool_name}"}
         
         return handler(parameters)
+
+    def _create_rds_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create RDS instance"""
+        db_name = params.get("db_name")
+        instance_class = params.get("instance_class", "db.t3.micro")
+        region = params.get("region", "us-east-1")
+        
+        # Generate Terraform config
+        project_name = f"rds_{db_name}"
+        project_path = self.terraform.workspace_dir / project_name
+        project_path.mkdir(parents=True, exist_ok=True)
+        
+        config = self.templates.rds_instance(db_name, instance_class, region)
+        (project_path / "main.tf").write_text(config)
+        
+        init_result = self.terraform.init(project_name)
+        if not init_result["success"]:
+            return init_result
+            
+        return {
+            "success": True,
+            "project_name": project_name,
+            "message": f"RDS instance project created. Run terraform_plan with project_name='{project_name}' to continue."
+        }
+
+    def _create_lambda_function(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create Lambda function"""
+        function_name = params.get("function_name")
+        region = params.get("region", "us-east-1")
+        
+        # Generate Terraform config
+        project_name = f"lambda_{function_name}"
+        project_path = self.terraform.workspace_dir / project_name
+        project_path.mkdir(parents=True, exist_ok=True)
+        
+        config = self.templates.lambda_function(function_name, region)
+        (project_path / "main.tf").write_text(config)
+        
+        # Create a dummy payload zip for Lambda
+        import zipfile
+        zip_path = project_path / "lambda_function_payload.zip"
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            zipf.writestr('index.py', 'def handler(event, context):\n    print("Hello from MCP Lambda!")\n    return {"statusCode": 200, "body": "Success"}')
+
+        init_result = self.terraform.init(project_name)
+        if not init_result["success"]:
+            return init_result
+            
+        return {
+            "success": True,
+            "project_name": project_name,
+            "message": f"Lambda function project created. Run terraform_plan with project_name='{project_name}' to continue."
+        }
     
     def _create_ec2_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Create EC2 instance"""

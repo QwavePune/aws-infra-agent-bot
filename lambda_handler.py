@@ -31,16 +31,32 @@ except ImportError:
     raise
 
 
+# Import MCP server for tool support
+try:
+    from mcp_servers.aws_terraform_server import mcp_server as aws_mcp
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    aws_mcp = None
+
+def deployment_integrity_check(event: Dict[str, Any]) -> bool:
+    """
+    Check if this is a real deployment request or just a test/dry-run.
+    In production, we expect a 'DEPLOY_REAL_INFRA' flag or env var.
+    """
+    # 1. Check environment variable (primary)
+    if os.getenv("DEPLOY_REAL_INFRA", "false").lower() == "true":
+        return True
+    
+    # 2. Check event flag (for testing/integration)
+    if event.get("force_deploy") is True:
+        return True
+        
+    return False
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Main Lambda handler for the LangChain agent
-    
-    Args:
-        event: Lambda event containing 'query', 'provider' (optional), 'credential_source' (optional)
-        context: Lambda context
-    
-    Returns:
-        Dict with 'statusCode', 'body', and 'response'
+    Main Lambda handler for the LangChain agent with Tool support
     """
     try:
         # Extract parameters from event
@@ -48,30 +64,36 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         provider = event.get('provider', os.getenv('LLM_PROVIDER', 'perplexity'))
         credential_source = event.get('credential_source', 'aws')
         conversation_history = event.get('conversation_history', [])
+        is_real_deploy = deployment_integrity_check(event)
         
         # Validate input
         if not query:
             return {
                 'statusCode': 400,
-                'body': json.dumps({'error': 'Missing required parameter: query'}),
-                'response': None
+                'body': json.dumps({'error': 'Missing required parameter: query'})
             }
         
-        logger.info(f"Processing query with provider: {provider}")
+        logger.info(f"Processing query. Real Deploy: {is_real_deploy}")
         
         # Initialize LLM
-        try:
-            llm = initialize_llm(provider, temperature=0, preferred_source=credential_source)
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM: {str(e)}")
-            return {
-                'statusCode': 500,
-                'body': json.dumps({'error': f'Failed to initialize LLM: {str(e)}'}),
-                'response': None
-            }
+        llm = initialize_llm(provider, temperature=0, preferred_source=credential_source)
         
-        # Convert conversation history to LangChain messages if provided
-        messages = []
+        # Bind tools if available
+        if MCP_AVAILABLE and aws_mcp:
+            tools = aws_mcp.list_tools()
+            llm = llm.bind_tools(tools)
+            logger.info(f"Bound {len(tools)} tools to LLM")
+        
+        # Prepare system prompt
+        system_prompt = (
+            "You are a strict AWS Infrastructure Provisioning Agent. "
+            "You MUST use tools for any AWS operations. "
+            f"Deployment Integrity: {'REAL_MODE' if is_real_deploy else 'DRY_RUN_MODE'}. "
+            "If in 'DRY_RUN_MODE', inform the user that infrastructure will not be actually deployed."
+        )
+        
+        messages = [HumanMessage(content=system_prompt if not conversation_history else "")]
+        # ... (rest of message conversion from original)
         if conversation_history:
             for msg in conversation_history:
                 if msg.get('role') == 'user':
@@ -79,17 +101,39 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 elif msg.get('role') == 'assistant':
                     messages.append(AIMessage(content=msg.get('content')))
         
-        # Add current query
         messages.append(HumanMessage(content=query))
         
-        # Get response from LLM
-        logger.info(f"Invoking LLM with {len(messages)} messages in context")
-        response = llm.invoke(messages)
+        # Tool execution loop
+        max_iterations = 5
+        iteration = 0
+        final_response = ""
         
-        # Add response to history
-        messages.append(AIMessage(content=response.content))
+        while iteration < max_iterations:
+            response = llm.invoke(messages)
+            messages.append(response)
+            
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                logger.info(f"Iteration {iteration}: Handling {len(response.tool_calls)} tool calls")
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_call_id = tool_call["id"]
+                    
+                    # Logic to block actual apply if not real deploy
+                    if tool_name == "terraform_apply" and not is_real_deploy:
+                        result = {"success": False, "error": "DRY_RUN_MODE: Actual deployment blocked. Please set DEPLOY_REAL_INFRA=true to proceed."}
+                    elif MCP_AVAILABLE and aws_mcp:
+                        result = aws_mcp.execute_tool(tool_name, tool_args)
+                    else:
+                        result = {"error": "MCP tools not available"}
+                        
+                    messages.append(ToolMessage(content=json.dumps(result), tool_call_id=tool_call_id))
+                iteration += 1
+            else:
+                final_response = response.content
+                break
         
-        # Prepare conversation history for return (convert to serializable format)
+        # Prepare history for return
         updated_history = []
         for msg in messages:
             if isinstance(msg, HumanMessage):
@@ -97,15 +141,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             elif isinstance(msg, AIMessage):
                 updated_history.append({'role': 'assistant', 'content': msg.content})
         
-        logger.info("Query processed successfully")
-        
         return {
             'statusCode': 200,
             'body': json.dumps({
-                'message': 'Query processed successfully',
-                'provider': provider
+                'is_real_deploy': is_real_deploy,
+                'tool_usage': iteration > 0
             }),
-            'response': response.content,
+            'response': final_response,
             'conversation_history': updated_history
         }
     

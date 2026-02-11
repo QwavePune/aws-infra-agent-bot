@@ -37,7 +37,7 @@ SUPPORTED_LLMS = {
         "name": "Google Gemini",
         "package": "langchain_google_genai",
         "class": "ChatGoogleGenerativeAI",
-        "default_model": "gemini-pro",
+        "default_model": "gemini-1.5-flash",
         "requires_api_key": True,
         "env_var": "GOOGLE_API_KEY",
     },

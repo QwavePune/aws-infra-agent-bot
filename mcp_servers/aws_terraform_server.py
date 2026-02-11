@@ -117,7 +117,7 @@ class TerraformManager:
             # Ensure AWS credentials from the current process are passed to terraform
             env = os.environ.copy()
             
-            logger.info(f"Running command: {' '.join(cmd)} in {cwd}")
+            logger.info(f"EXECUTION: Real AWS Provisioning - Running command: {' '.join(cmd)} in {cwd}")
             result = subprocess.run(
                 cmd,
                 cwd=cwd,

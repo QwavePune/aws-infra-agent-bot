@@ -212,7 +212,7 @@ const refreshAwsIdentity = async () => {
     const data = await response.json();
     if (data.active) {
       awsIdentity.style.display = "flex";
-      awsAccountLabel.textContent = `AWS: ${data.account}`;
+      awsAccountLabel.innerHTML = `AWS: ${data.account} <small style="opacity: 0.7; margin-left: 5px;">(${data.profile})</small>`;
       awsLoginBtn.textContent = "Refresh CLI";
       awsLoginBtn.classList.remove("btn-primary");
       awsLoginBtn.classList.add("btn-secondary");
@@ -232,14 +232,30 @@ awsConsoleBtn.addEventListener("click", () => {
 });
 
 awsLoginBtn.addEventListener("click", async () => {
+  const profile = prompt("Enter AWS Profile name (e.g. sso-profile) or leave blank for 'default':", "default");
+  if (profile === null) return; // Cancelled
+
+  // Set the profile first
+  await fetch("/api/aws/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile })
+  });
+
   awsLoginBtn.disabled = true;
   awsLoginBtn.textContent = "Launching...";
   try {
-    const response = await fetch("/api/aws/login", { method: "POST" });
+    const response = await fetch("/api/aws/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile })
+    });
     const data = await response.json();
     if (data.success) {
-      alert("CLI Login process started! Please check your terminal or browser.");
-      addMessage("assistant", "AWS CLI Login initiated. If no browser tab opened automatically, please run 'aws sso login' in your Mac terminal.");
+      alert(`CLI Login process started for profile '${profile}'! Please check your terminal or browser.`);
+      addMessage("assistant", `AWS CLI Login initiated for profile: ${profile}. If no browser tab opened automatically, please run 'aws sso login --profile ${profile}' in your terminal.`);
+      // Refresh identity after a short delay
+      setTimeout(refreshAwsIdentity, 5000);
     } else {
       alert(data.error || "Failed to trigger login");
     }

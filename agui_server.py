@@ -175,6 +175,19 @@ async def execute_mcp_tool(request: MCPToolRequest):
         })
 
 
+@app.get("/api/env")
+async def get_env():
+    """Get non-sensitive environment variables for debugging"""
+    logger.info("API Request: GET /api/env")
+    env_info = {}
+    for k, v in os.environ.items():
+        if any(secret in k.upper() for secret in ["KEY", "SECRET", "TOKEN", "PASSWORD"]):
+            env_info[k] = "********"
+        else:
+            env_info[k] = v
+    return JSONResponse(env_info)
+
+
 @app.get("/api/aws/identity")
 async def get_aws_identity():
     """Get current AWS identity and check if session is active"""
@@ -186,12 +199,21 @@ async def get_aws_identity():
         # Re-initialize to catch new credentials
         aws_mcp.rbac.initialize()
         info = aws_mcp.rbac.get_user_info()
+        
+        if "error" in info:
+             return JSONResponse({
+                "active": False,
+                "error": info["error"],
+                "profile": os.environ.get("AWS_PROFILE", "default")
+            })
+
         regions = aws_mcp.rbac.get_allowed_regions()
         return JSONResponse({
             "active": True,
             "account": info.get("account_id"),
             "arn": info.get("user_arn"),
-            "regions": regions
+            "regions": regions,
+            "profile": os.environ.get("AWS_PROFILE", "default")
         })
     except Exception as e:
         logger.warning(f"Failed to get AWS identity: {e}")
@@ -201,15 +223,30 @@ async def get_aws_identity():
         })
 
 
+@app.post("/api/aws/profile")
+async def set_aws_profile(payload: Dict[str, str]):
+    """Set the active AWS profile for the server process"""
+    profile = payload.get("profile", "default")
+    logger.info(f"API Request: POST /api/aws/profile - New Profile: {profile}")
+    os.environ["AWS_PROFILE"] = profile
+    
+    # Force re-initialization of MCP
+    if MCP_AVAILABLE and aws_mcp:
+        aws_mcp.rbac.initialize()
+        
+    return JSONResponse({"success": True, "profile": profile})
+
+
 @app.post("/api/aws/login")
-async def trigger_aws_login():
-    """Trigger 'aws sso login' or standard login"""
-    logger.info("API Request: POST /api/aws/login")
+async def trigger_aws_login(payload: Dict[str, str] = None):
+    """Trigger 'aws sso login' for the configured profile"""
+    profile = (payload or {}).get("profile") or os.environ.get("AWS_PROFILE", "default")
+    logger.info(f"API Request: POST /api/aws/login - Profile: {profile}")
     try:
         # Use subprocess to run the login command
         # Removing pipes allows the command to better interact with the OS browser launcher
         process = subprocess.Popen(
-            ["aws", "sso", "login"]
+            ["aws", "sso", "login", "--profile", profile]
         )
         return JSONResponse({
             "success": True,
@@ -292,13 +329,16 @@ async def run_agent(payload: RunRequest):
     if not history:
         system_prompt = (
             "You are a strict AWS Infrastructure Provisioning Agent. "
-            "CRITICAL: You MUST use the provided MCP tools for ANY infrastructure operation. "
-            "NEVER hallucinate or simulate a successful deployment. If you encounter an error or lack permissions, report it honestly. "
+            "Your main purpose is to interact with AWS through the provided MCP tools. "
+            "CRITICAL: ALWAYS try to use the 'get_user_permissions' or 'get_infrastructure_state' tools before claiming you lack access or login info. "
+            "Never assume the user is logged out just because you haven't run a tool yet. "
+            "If a tool fails with a credential error, then and only then should you ask the user to check their 'CLI Login'. "
             "To build infrastructure: 1. Generate the project/config 2. Run terraform_plan 3. Run terraform_apply. "
-            "If a user says 'apply' or 'execute', you MUST call the terraform_apply tool with the correct project name. "
-            "Always report the real output from the tools. If you need AWS credentials, remind the user to click 'CLI Login'."
+            "If user says 'apply' or 'execute', you MUST call 'terraform_apply' with the correct project name. "
+            "Be concise and technical. Report tool outputs directly."
         )
         history.append(SystemMessage(content=system_prompt))
+        logger.info(f"[{run_id}] System prompt initialized")
     
     # Safety: Only append user message if the last message wasn't already a user message
     if not history or not isinstance(history[-1], HumanMessage):
@@ -330,10 +370,20 @@ async def run_agent(payload: RunRequest):
             
             llm = get_llm(payload.provider, payload.model, payload.credentialSource, payload.mcpServer)
             
-            # Simple tool calling loop
+            # Check if tools are actually available on this LLM instance
+            has_tools = hasattr(llm, "tool_calls") or (hasattr(llm, "bind_tools") and payload.mcpServer != "none")
+            logger.info(f"[{run_id}] LLM provider: {payload.provider}, Has Tool Support: {has_tools}")
+            
+            if payload.provider == "perplexity" and payload.mcpServer != "none":
+                yield sse_event({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": "> **Note:** Perplexity (Sonar) may have limited support for dynamic tool calling. If tools aren't being used, try switching to a model like GPT-4o or Gemini.\n\n",
+                    "timestamp": now_ms(),
+                })
+            # Tool calling loop state
             max_iterations = 5
             iteration = 0
-            
             while iteration < max_iterations:
                 response = llm.invoke(history)
                 history.append(response)
@@ -442,7 +492,7 @@ async def run_agent(payload: RunRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "9595"))
     logger.info(f"Starting uvicorn server on http://0.0.0.0:{port}")
     logger.info(f"Reload mode: enabled")
     uvicorn.run("agui_server:app", host="0.0.0.0", port=port, reload=True)

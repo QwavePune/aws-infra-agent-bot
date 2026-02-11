@@ -10,24 +10,19 @@ The primary goal of this project is to empower users to build and manage complex
 ## ✨ Key Features
 
 ### 🏗️ AWS Infrastructure as Code (IaC)
-- **Terraform Integration:** Automatically generates, plans, and applies Terraform configurations.
-- **Pre-built Templates:** Supports VPCs, EC2 instances, S3 buckets, and more out of the box.
-- **Safe Execution:** Implements a "Plan-First" workflow with raw tool output visibility to prevent hallucinations.
+- **Terraform Integration:** Automatically generates, plans, and applies Terraform configurations with environment-aware execution.
+- **Production Templates:** Sophisticated patterns for **Multi-AZ VPCs**, **RDS PostgreSQL**, **AWS Lambda**, and EC2 with automatic Security Group provisioning.
+- **Safe Execution:** Implements a "Plan-First" workflow with raw tool output visibility and `-input=false` protection for stable deployments.
 
 ### 🖥️ AG-UI Console (Web Interface)
-- **Real-time Streaming:** Uses Server-Sent Events (SSE) for a responsive, interactive chat experience.
-- **Integrated AWS Login:** Dedicated buttons for CLI authentication and direct AWS Console access.
-- **Model & MCP Picker:** Switch between different LLM providers (Anthropic, OpenAI, Gemini) and MCP servers on the fly.
-- **Premium Aesthetics:** A modern, dark-themed UI built with Calibri typography and a productivity-focused layout.
+- **Real-time Streaming:** Uses Server-Sent Events (SSE) for a fast, token-by-token interactive chat experience.
+- **AWS Profile Selector:** Dynamically switch between AWS CLI profiles (SSO support included) directly from the UI.
+- **Identity Awareness:** Real-time verification of the active AWS Account ID and IAM User/Role in the header.
 
-### 🔒 Enterprise-Grade Security
-- **Multi-Source Credentials:** Supports Local Keyring (macOS Keychain), Azure KeyVault, and AWS Secrets Manager.
-- **IAM-Aware:** Built-in RBAC (Role-Based Access Control) using AWS IAM credentials.
-- **No Hardcoded Secrets:** Securely retrieves API keys and cloud credentials at runtime.
-
-### 🛠️ Extensible MCP Architecture
-- **MCP Server:** A standalone Model Context Protocol server for AWS/Terraform operations.
-- **Tool Binding:** Dynamically binds cloud tools to the LLM's workspace for real-time execution.
+### 🤖 Advanced CLI Agent
+- **Infrastructure Ready:** The `langchain-agent.py` CLI is a full-featured infrastructure engine, supporting the same tool-calling loops as the Web UI.
+- **Identity Check:** Automatically verifies AWS session health and profile context on startup.
+- **Multi-LLM Setup:** centralized `setup_keychain.py` for configuring OpenAI, Gemini, Perplexity, and more.
 
 ---
 

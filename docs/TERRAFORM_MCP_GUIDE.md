@@ -5,11 +5,11 @@ This project now includes a Model Context Protocol (MCP) server for AWS Infrastr
 ## Features
 - **Natural Language Infrastructure**: "Deploy a production-grade VPC and an RDS database."
 - **RBAC Integration**: Automatically checks your AWS IAM permissions using the IAM Policy Simulator.
-- **Robust Terraform Automation**: Inherits your active shell's environment for seamless `terraform apply`.
+- **Flexible Provisioning Modes**: Choose between **Terraform** (for state-managed, production-ready IaC) or **AWS CLI** (for quick, direct resource creation).
 - **Production-Grade Templates**: 
   - **Multi-AZ VPC**: Optimized network layout with public/private subnets.
-  - **RDS PostgreSQL**: Managed database provisioning with security defaults.
-  - **AWS Lambda**: Automated function creation including boilerplate code and IAM roles.
+  - **RDS PostgreSQL**: Managed database provisioning with security defaults (Terraform only).
+  - **AWS Lambda**: Automated function creation including boilerplate code and IAM roles (Terraform only).
   - **EC2 with Security Groups**: Automatic firewall provisioning for SSH and HTTP.
 
 ## Prerequisites

@@ -40,12 +40,38 @@ class AWSRBACManager:
             self.iam_client = session.client('iam')
             self.identity = self.sts_client.get_caller_identity()
             
-            logger.info(f"AWS Identity Successfully Retreived: {self.identity.get('Arn')}")
+            logger.info(f"AWS Identity Successfully Retrieved: {self.identity.get('Arn')}")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize AWS clients: {str(e)}")
             self.identity = None
             return False
+
+    def get_credentials_env(self) -> Dict[str, str]:
+        """Get active AWS credentials as environment variables for subprocesses"""
+        try:
+            session = boto3.Session()
+            creds = session.get_credentials()
+            if not creds:
+                return {}
+            
+            frozen = creds.get_frozen_credentials()
+            env = {
+                "AWS_ACCESS_KEY_ID": frozen.access_key,
+                "AWS_SECRET_ACCESS_KEY": frozen.secret_key,
+            }
+            if frozen.token:
+                env["AWS_SESSION_TOKEN"] = frozen.token
+                
+            region = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+            if region:
+                env["AWS_REGION"] = region
+                env["AWS_DEFAULT_REGION"] = region
+                
+            return env
+        except Exception as e:
+            logger.warning(f"Could not extract session credentials: {e}")
+            return {}
     
     def get_user_info(self) -> Dict[str, Any]:
         """Get current AWS user information"""
@@ -76,6 +102,11 @@ class AWSRBACManager:
             bool: True if user has permission
         """
         try:
+            # Root user check - SimulatePrincipalPolicy doesn't support the root user ARN
+            if self.identity and self.identity.get("Arn") and ":root" in self.identity["Arn"]:
+                logger.info("Root user detected, skipping permission check (Full Access)")
+                return True
+
             # Use IAM policy simulator to check permissions
             response = self.iam_client.simulate_principal_policy(
                 PolicySourceArn=self.identity["Arn"],
@@ -90,7 +121,7 @@ class AWSRBACManager:
             return False
         except Exception as e:
             logger.warning(f"Permission check failed: {e}")
-            # Default to allowing if check fails (can be made stricter)
+            # Default to allowing if check fails (most common for restricted accounts or Root)
             return True
     
     def get_allowed_regions(self) -> List[str]:
@@ -102,20 +133,55 @@ class AWSRBACManager:
         except Exception as e:
             logger.error(f"Failed to get regions: {e}")
             return ["us-east-1"]  # Default fallback
+    
+    def get_existing_security_group(self, sg_name: str, region: str) -> Optional[str]:
+        """
+        Query for an existing security group by name in a region.
+        
+        Args:
+            sg_name: Security group name to search for
+            region: AWS region
+            
+        Returns:
+            Security group ID if found, None otherwise
+        """
+        try:
+            ec2_client = boto3.client('ec2', region_name=region)
+            response = ec2_client.describe_security_groups(
+                Filters=[{'Name': 'group-name', 'Values': [sg_name]}]
+            )
+            
+            if response.get('SecurityGroups'):
+                sg_id = response['SecurityGroups'][0]['GroupId']
+                logger.info(f"Found existing security group '{sg_name}' in {region}: {sg_id}")
+                return sg_id
+            
+            logger.debug(f"No existing security group '{sg_name}' found in {region}")
+            return None
+        except Exception as e:
+            logger.warning(f"Error querying security groups in {region}: {e}")
+            return None
 
 
 class TerraformManager:
     """Manages Terraform operations"""
     
-    def __init__(self, workspace_dir: str = "./terraform_workspace"):
+    def __init__(self, workspace_dir: str = "./terraform_workspace", rbac_manager=None):
         self.workspace_dir = Path(workspace_dir)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.rbac = rbac_manager
         
     def _run_terraform(self, cmd: List[str], cwd: Path) -> Dict[str, Any]:
-        """Run terraform command with inherited environment"""
+        """Run terraform command with inherited environment and explicit credentials"""
         try:
-            # Ensure AWS credentials from the current process are passed to terraform
+            # Inherit current env and overlay with active session credentials
             env = os.environ.copy()
+            if self.rbac:
+                creds = self.rbac.get_credentials_env()
+                env.update(creds)
+                if "AWS_PROFILE" in env:
+                    # Remove AWS_PROFILE to ensure injected credentials are used
+                    del env["AWS_PROFILE"]
             
             logger.info(f"EXECUTION: Real AWS Provisioning - Running command: {' '.join(cmd)} in {cwd}")
             result = subprocess.run(
@@ -134,6 +200,7 @@ class TerraformManager:
                 "success": result.returncode == 0,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "error": result.stderr if result.returncode != 0 else None,
                 "returncode": result.returncode
             }
         except subprocess.TimeoutExpired:
@@ -176,18 +243,34 @@ class TerraformManager:
         """Run terraform destroy"""
         project_path = self.workspace_dir / project_dir
         
-        cmd = ["terraform", "destroy"]
+        # Check if project directory exists
+        if not project_path.exists():
+            logger.error(f"Project directory does not exist: {project_path}")
+            return {
+                "success": False,
+                "error": f"Project directory '{project_dir}' not found. Use terraform_plan first to create the project."
+            }
+        
+        cmd = ["terraform", "destroy", "-input=false"]
         if auto_approve:
             cmd.append("-auto-approve")
         
         try:
+            # Inherit environment for AWS credentials
+            env = os.environ.copy()
+            
+            logger.info(f"EXECUTION: Real AWS Destruction - Running command: {' '.join(cmd)} in {project_path}")
             result = subprocess.run(
                 cmd,
                 cwd=project_path,
                 capture_output=True,
                 text=True,
+                env=env,
                 timeout=1800
             )
+            
+            if result.returncode != 0:
+                logger.error(f"Terraform destroy command failed: {result.stderr}")
             
             return {
                 "success": result.returncode == 0,
@@ -196,7 +279,11 @@ class TerraformManager:
                 "returncode": result.returncode
             }
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Terraform destroy timed out"}
+            logger.error(f"Terraform destroy timed out: {' '.join(cmd)}")
+            return {"success": False, "error": "Terraform destroy timed out (exceeded 30 minutes)"}
+        except Exception as e:
+            logger.error(f"Error running terraform destroy: {str(e)}")
+            return {"success": False, "error": str(e)}
     
     def show_state(self, project_dir: str) -> Dict[str, Any]:
         """Show current Terraform state"""
@@ -226,20 +313,154 @@ class TerraformManager:
             return {"success": False, "error": "Terraform show timed out"}
 
 
+class AWSCLIManager:
+    """Manages direct AWS CLI operations"""
+    
+    def __init__(self, rbac_manager=None):
+        self.rbac = rbac_manager
+
+    def _run_aws_cli(self, cmd: List[str]) -> Dict[str, Any]:
+        """Run AWS CLI command with inherited environment and explicit credentials"""
+        try:
+            full_cmd = ["aws"] + cmd
+            # Inherit env and overlay with session credentials
+            env = os.environ.copy()
+            if self.rbac:
+                creds = self.rbac.get_credentials_env()
+                env.update(creds)
+                if "AWS_PROFILE" in env:
+                    del env["AWS_PROFILE"]
+            
+            logger.info(f"EXECUTION: Real AWS Provisioning - Running AWS CLI: {' '.join(full_cmd)}")
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=600
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"AWS CLI command failed: {result.stderr}")
+            
+            return {
+                "success": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "error": result.stderr if result.returncode != 0 else None,
+                "returncode": result.returncode
+            }
+        except subprocess.TimeoutExpired:
+            logger.error(f"AWS CLI command timed out: {' '.join(full_cmd)}")
+            return {"success": False, "error": "AWS CLI command timed out"}
+        except Exception as e:
+            logger.error(f"Error running AWS CLI: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def create_s3_bucket(self, bucket_name: str, region: str = "us-east-1") -> Dict[str, Any]:
+        """Create S3 bucket using AWS CLI"""
+        cmd = ["s3api", "create-bucket", "--bucket", bucket_name, "--region", region]
+        if region != "us-east-1":
+            cmd.extend(["--create-bucket-configuration", f"LocationConstraint={region}"])
+        return self._run_aws_cli(cmd)
+
+    def create_ec2_instance(self, instance_type: str, ami_id: str, region: str) -> Dict[str, Any]:
+        """Create EC2 instance using AWS CLI"""
+        cmd = [
+            "ec2", "run-instances",
+            "--image-id", ami_id,
+            "--count", "1",
+            "--instance-type", instance_type,
+            "--region", region,
+            "--tag-specifications", f"ResourceType=instance,Tags=[{{Key=Name,Value=CLI-Provisioned-Instance}},{{Key=ManagedBy,Value=AWS-Infra-Agent-MCP}}]"
+        ]
+        return self._run_aws_cli(cmd)
+
+    def create_vpc(self, cidr_block: str, region: str) -> Dict[str, Any]:
+        """Create VPC using AWS CLI"""
+        cmd = ["ec2", "create-vpc", "--cidr-block", cidr_block, "--region", region]
+        return self._run_aws_cli(cmd)
+
+    def create_lambda_function(self, function_name: str, role_arn: str, handler: str, runtime: str, zip_file: str, region: str) -> Dict[str, Any]:
+        """Create Lambda function using AWS CLI"""
+        cmd = [
+            "lambda", "create-function",
+            "--function-name", function_name,
+            "--role", role_arn,
+            "--handler", handler,
+            "--runtime", runtime,
+            "--zip-file", f"fileb://{zip_file}",
+            "--region", region
+        ]
+        return self._run_aws_cli(cmd)
+
+
 class AWSInfrastructureTemplates:
     """Pre-built Terraform templates for common AWS infrastructure"""
     
     @staticmethod
-    def ec2_instance(instance_type: str = "t2.micro", ami_id: str = None, region: str = "us-east-1") -> str:
-        """Generate Terraform config for EC2 instance"""
-        if not ami_id:
-            # Default Amazon Linux 2 AMI (region-specific)
-            ami_map = {
-                "us-east-1": "ami-0c55b159cbfafe1f0",
-                "us-west-2": "ami-0d1cd67c26f5fca19"
-            }
-            ami_id = ami_map.get(region, ami_map["us-east-1"])
+    def ec2_instance(instance_type: str = "t2.micro", ami_id: str = None, region: str = "us-east-1", security_group_id: str = None) -> str:
+        """Generate Terraform config for EC2 instance
         
+        Args:
+            instance_type: EC2 instance type (default: t2.micro)
+            ami_id: Optional AMI ID (if None, queries for latest Amazon Linux 2023)
+            region: AWS region (default: us-east-1)
+            security_group_id: Optional existing security group ID (if None, creates new one)
+        """
+        
+        ami_block = ""
+        actual_ami = f'"{ami_id}"' if ami_id else "data.aws_ami.amazon_linux_2023.id"
+        
+        if not ami_id:
+            ami_block = """
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023*-x86_64"]
+  }
+}
+"""
+        
+        # Security group block: use existing or create new
+        if security_group_id:
+            sg_reference = f'"{security_group_id}"'
+            sg_resource_block = f"""
+# Using existing security group {security_group_id}
+"""
+        else:
+            sg_reference = "aws_security_group.instance_sg.id"
+            sg_resource_block = """
+resource "aws_security_group" "instance_sg" {
+  name        = "allow_ssh_http"
+  description = "Allow SSH and HTTP traffic"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+"""
+
         return f"""
 terraform {{
   required_providers {{
@@ -254,36 +475,13 @@ provider "aws" {{
   region = "{region}"
 }}
 
-resource "aws_security_group" "instance_sg" {{
-  name        = "allow_ssh_http"
-  description = "Allow SSH and HTTP traffic"
-
-  ingress {{
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
-
-  ingress {{
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
-
-  egress {{
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
-}}
+{ami_block}
+{sg_resource_block}
 
 resource "aws_instance" "main" {{
-  ami           = "{ami_id}"
+  ami           = {actual_ami}
   instance_type = "{instance_type}"
-  vpc_security_group_ids = [aws_security_group.instance_sg.id]
+  vpc_security_group_ids = [{sg_reference}]
   
   tags = {{
     Name = "Production-Instance"
@@ -524,12 +722,13 @@ resource "aws_lambda_function" "test_lambda" {{
 
 
 # MCP Server Tools
-class MCPAWSTerraformServer:
-    """MCP Server for AWS Terraform operations"""
+class MCPAWSManagerServer:
+    """MCP Server for AWS provisioning via Terraform or CLI"""
     
     def __init__(self):
         self.rbac = AWSRBACManager()
-        self.terraform = TerraformManager()
+        self.terraform = TerraformManager(rbac_manager=self.rbac)
+        self.aws_cli = AWSCLIManager(rbac_manager=self.rbac)
         self.templates = AWSInfrastructureTemplates()
         
     def initialize(self) -> Dict[str, Any]:
@@ -546,7 +745,8 @@ class MCPAWSTerraformServer:
         return {
             "success": True,
             "user_info": user_info,
-            "message": "AWS Terraform MCP Server initialized successfully"
+            "message": "AWS Manager MCP Server initialized successfully. Tools support both 'terraform' and 'cli' modes via the 'mode' parameter.",
+            "preferred_method": "terraform"
         }
     
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -554,7 +754,7 @@ class MCPAWSTerraformServer:
         return [
             {
                 "name": "create_ec2_instance",
-                "description": "Create an EC2 instance using Terraform",
+                "description": "Create an EC2 instance using Terraform or AWS CLI",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -569,13 +769,18 @@ class MCPAWSTerraformServer:
                         "ami_id": {
                             "type": "string",
                             "description": "AMI ID (optional)"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["terraform", "cli"],
+                            "description": "Provisioning method (default: terraform)"
                         }
                     }
                 }
             },
             {
                 "name": "create_s3_bucket",
-                "description": "Create an S3 bucket using Terraform",
+                "description": "Create an S3 bucket. Supports 'terraform' mode (default) for state management or 'cli' mode for direct execution.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -590,6 +795,11 @@ class MCPAWSTerraformServer:
                         "versioning": {
                             "type": "boolean",
                             "description": "Enable versioning (default: true)"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["terraform", "cli"],
+                            "description": "Provisioning method (default: terraform)"
                         }
                     },
                     "required": ["bucket_name"]
@@ -597,7 +807,7 @@ class MCPAWSTerraformServer:
             },
             {
                 "name": "create_vpc",
-                "description": "Create a VPC with subnets using Terraform",
+                "description": "Create a VPC with subnets using Terraform or AWS CLI",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -608,13 +818,18 @@ class MCPAWSTerraformServer:
                         "region": {
                             "type": "string",
                             "description": "AWS region (default: us-east-1)"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["terraform", "cli"],
+                            "description": "Provisioning method (default: terraform)"
                         }
                     }
                 }
             },
             {
                 "name": "create_rds_instance",
-                "description": "Create an RDS PostgreSQL instance using Terraform",
+                "description": "Create an RDS PostgreSQL instance using Terraform or AWS CLI",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -629,6 +844,11 @@ class MCPAWSTerraformServer:
                         "region": {
                             "type": "string",
                             "description": "AWS region (default: us-east-1)"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["terraform", "cli"],
+                            "description": "Provisioning method (default: terraform)"
                         }
                     },
                     "required": ["db_name"]
@@ -636,7 +856,7 @@ class MCPAWSTerraformServer:
             },
             {
                 "name": "create_lambda_function",
-                "description": "Create a Lambda function using Terraform",
+                "description": "Create a Lambda function using Terraform or AWS CLI",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -647,6 +867,11 @@ class MCPAWSTerraformServer:
                         "region": {
                             "type": "string",
                             "description": "AWS region (default: us-east-1)"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["terraform", "cli"],
+                            "description": "Provisioning method (default: terraform)"
                         }
                     },
                     "required": ["function_name"]
@@ -726,6 +951,29 @@ class MCPAWSTerraformServer:
             }
         ]
     
+    def _resolve_project_name(self, project_name: str) -> str:
+        """
+        Resolve project name by checking if it exists directly or with common prefixes.
+        This helps when agents forget to include the resource-type prefix.
+        """
+        if not project_name:
+            return project_name
+            
+        # 1. Try exact match
+        if (self.terraform.workspace_dir / project_name).exists():
+            return project_name
+            
+        # 2. Try common prefixes
+        prefixes = ["s3_", "ec2_", "vpc_", "rds_", "lambda_"]
+        for prefix in prefixes:
+            if not project_name.startswith(prefix):
+                candidate = f"{prefix}{project_name}"
+                if (self.terraform.workspace_dir / candidate).exists():
+                    logger.info(f"Resolved project '{project_name}' to '{candidate}'")
+                    return candidate
+                    
+        return project_name
+
     def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Execute an MCP tool"""
         logger.info(f"Executing tool: {tool_name} with parameters: {parameters}")
@@ -763,12 +1011,20 @@ class MCPAWSTerraformServer:
         return handler(parameters)
 
     def _create_rds_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create RDS instance"""
+        """Create RDS instance using Terraform or CLI"""
         db_name = params.get("db_name")
         instance_class = params.get("instance_class", "db.t3.micro")
         region = params.get("region", "us-east-1")
+        mode = params.get("mode", "terraform").lower() or "terraform"
         
-        # Generate Terraform config
+        if mode == "cli":
+            # Direct CLI provisioning
+            return {
+                "success": False,
+                "error": "RDS CLI provisioning is complex and not yet implemented for direct CLI mode. Please use 'terraform' mode for RDS."
+            }
+            
+        # Generate Terraform config (Default)
         project_name = f"rds_{db_name}"
         project_path = self.terraform.workspace_dir / project_name
         project_path.mkdir(parents=True, exist_ok=True)
@@ -787,10 +1043,17 @@ class MCPAWSTerraformServer:
         }
 
     def _create_lambda_function(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create Lambda function"""
+        """Create Lambda function using Terraform or CLI"""
         function_name = params.get("function_name")
         region = params.get("region", "us-east-1")
+        mode = params.get("mode", "terraform").lower() or "terraform"
         
+        if mode == "cli":
+            return {
+                "success": False,
+                "error": "Lambda CLI provisioning requires pre-existing IAM roles and zip files. Please use 'terraform' mode for zero-config Lambda deployment."
+            }
+
         # Generate Terraform config
         project_name = f"lambda_{function_name}"
         project_path = self.terraform.workspace_dir / project_name
@@ -816,21 +1079,33 @@ class MCPAWSTerraformServer:
         }
     
     def _create_ec2_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create EC2 instance"""
+        """Create EC2 instance using Terraform or CLI"""
         instance_type = params.get("instance_type", "t2.micro")
         region = params.get("region", "us-east-1")
         ami_id = params.get("ami_id")
+        mode = params.get("mode", "terraform").lower() or "terraform"
         
         # Check permissions
         if not self.rbac.check_permission("ec2:RunInstances"):
             return {"success": False, "error": "User lacks ec2:RunInstances permission"}
+        
+        if mode == "cli":
+            if not ami_id:
+                return {"success": False, "error": "ami_id is required for CLI mode"}
+            return self.aws_cli.create_ec2_instance(instance_type, ami_id, region)
+
+        # Check for existing security group and reuse it
+        existing_sg_id = self.rbac.get_existing_security_group("allow_ssh_http", region)
+        sg_message = ""
+        if existing_sg_id:
+            sg_message = f" (reusing existing security group {existing_sg_id})"
         
         # Generate Terraform config
         project_name = f"ec2_{instance_type}_{region}"
         project_path = self.terraform.workspace_dir / project_name
         project_path.mkdir(parents=True, exist_ok=True)
         
-        config = self.templates.ec2_instance(instance_type, ami_id, region)
+        config = self.templates.ec2_instance(instance_type, ami_id, region, existing_sg_id)
         (project_path / "main.tf").write_text(config)
         
         # Initialize Terraform
@@ -841,23 +1116,27 @@ class MCPAWSTerraformServer:
         return {
             "success": True,
             "project_name": project_name,
-            "message": f"EC2 instance project created. Run terraform_plan with project_name='{project_name}' to continue.",
+            "message": f"EC2 instance project created{sg_message}. Run terraform_plan with project_name='{project_name}' to continue.",
             "config_preview": config[:500] + "..."
         }
     
     def _create_s3_bucket(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create S3 bucket"""
+        """Create S3 bucket using Terraform or CLI"""
         bucket_name = params.get("bucket_name")
         if not bucket_name:
             return {"success": False, "error": "bucket_name is required"}
         
         region = params.get("region", "us-east-1")
         versioning = params.get("versioning", True)
+        mode = params.get("mode", "terraform").lower() or "terraform"
         
         # Check permissions
         if not self.rbac.check_permission("s3:CreateBucket"):
             return {"success": False, "error": "User lacks s3:CreateBucket permission"}
         
+        if mode == "cli":
+            return self.aws_cli.create_s3_bucket(bucket_name, region)
+
         # Generate Terraform config
         project_name = f"s3_{bucket_name}"
         project_path = self.terraform.workspace_dir / project_name
@@ -879,14 +1158,18 @@ class MCPAWSTerraformServer:
         }
     
     def _create_vpc(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create VPC"""
+        """Create VPC using Terraform or CLI"""
         cidr_block = params.get("cidr_block", "10.0.0.0/16")
         region = params.get("region", "us-east-1")
+        mode = params.get("mode", "terraform").lower() or "terraform"
         
         # Check permissions
         if not self.rbac.check_permission("ec2:CreateVpc"):
             return {"success": False, "error": "User lacks ec2:CreateVpc permission"}
         
+        if mode == "cli":
+            return self.aws_cli.create_vpc(cidr_block, region)
+
         # Generate Terraform config
         project_name = f"vpc_{region}"
         project_path = self.terraform.workspace_dir / project_name
@@ -909,7 +1192,7 @@ class MCPAWSTerraformServer:
     
     def _terraform_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run terraform plan"""
-        project_name = params.get("project_name")
+        project_name = self._resolve_project_name(params.get("project_name"))
         if not project_name:
             return {"success": False, "error": "project_name is required"}
         
@@ -917,7 +1200,7 @@ class MCPAWSTerraformServer:
     
     def _terraform_apply(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run terraform apply"""
-        project_name = params.get("project_name")
+        project_name = self._resolve_project_name(params.get("project_name"))
         if not project_name:
             return {"success": False, "error": "project_name is required"}
         
@@ -926,7 +1209,7 @@ class MCPAWSTerraformServer:
     
     def _terraform_destroy(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run terraform destroy"""
-        project_name = params.get("project_name")
+        project_name = self._resolve_project_name(params.get("project_name"))
         if not project_name:
             return {"success": False, "error": "project_name is required"}
         
@@ -935,7 +1218,7 @@ class MCPAWSTerraformServer:
     
     def _get_infrastructure_state(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Get infrastructure state"""
-        project_name = params.get("project_name")
+        project_name = self._resolve_project_name(params.get("project_name"))
         if not project_name:
             return {"success": False, "error": "project_name is required"}
         
@@ -954,4 +1237,4 @@ class MCPAWSTerraformServer:
 
 
 # Singleton instance
-mcp_server = MCPAWSTerraformServer()
+mcp_server = MCPAWSManagerServer()

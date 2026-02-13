@@ -4,8 +4,17 @@ import logging
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+
+# Set up paths dynamically
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_ROOT = os.path.dirname(BIN_DIR)
+
+# Add APP_ROOT to sys.path so we can find core and mcp_servers packages
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from llm_config import select_llm_interactive, select_credential_source_interactive, initialize_llm
+from core.llm_config import select_llm_interactive, select_credential_source_interactive, initialize_llm
 
 # Import MCP server
 try:
@@ -16,12 +25,14 @@ except ImportError:
     aws_mcp = None
 
 # Configure logging
+LOG_DIR = os.path.join(APP_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('.agent-session.log', mode='a')
+        logging.FileHandler(os.path.join(LOG_DIR, 'agent_session.log'), mode='a')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -64,12 +75,19 @@ try:
     if MCP_AVAILABLE and aws_mcp:
         tools = aws_mcp.list_tools()
         try:
-            llm = llm.bind_tools(tools)
-            print(f"✅ {len(tools)} AWS Tools bound to agent.")
+            # Check if bind_tools exists on the llm object
+            if hasattr(llm, "bind_tools"):
+                llm = llm.bind_tools(tools)
+                print(f"✅ {len(tools)} AWS Tools bound to engine.")
+            else:
+                print(f"⚠️  Warning: {llm_provider.upper()} does not support native tool binding.")
+                logger.warning(f"{llm_provider} lacks bind_tools method")
         except Exception as tool_err:
-            logger.warning(f"Failed to bind tools: {tool_err}")
+            print(f"⚠️  Warning: Failed to bind tools to {llm_provider}: {tool_err}")
+            import traceback
+            logger.error(f"Tool binding failed: {traceback.format_exc()}")
             
-    print(f"✅ {llm_provider.upper()} initialized successfully!\n")
+    print(f"✅ {llm_provider.upper()} engine initialized!\n")
     
     # Verify AWS Identity
     if MCP_AVAILABLE and aws_mcp:
@@ -94,14 +112,16 @@ print("=" * 60)
 
 # Initialize conversation with the strict system prompt from agui_server
 system_prompt = (
-    "You are a strict AWS Infrastructure Provisioning Agent. "
-    "Your main purpose is to interact with AWS through the provided MCP tools. "
-    "CRITICAL: ALWAYS try to use the 'get_user_permissions' or 'get_infrastructure_state' tools before claiming you lack access or login info. "
-    "Never assume the user is logged out just because you haven't run a tool yet. "
-    "If a tool fails with a credential error, then and only then should you ask the user to check their login. "
-    "To build infrastructure: 1. Generate the project/config 2. Run terraform_plan 3. Run terraform_apply. "
-    "If user says 'apply' or 'execute', you MUST call 'terraform_apply' with the correct project name. "
-    "Be concise and technical. Report tool outputs directly."
+    "You are an AWS Infrastructure Execution Engine. "
+    "Your ONLY output should be a tool call when an action is required. "
+    "DO NOT explain what you are going to do. DO NOT ask for permission. DO NOT ask for tool outputs. "
+    "THE SYSTEM AUTOMATICALLY EXECUTES YOUR TOOL CALLS AND PROVIDES THE DATA. "
+    "1. For any AWS request, first CALL 'get_user_permissions' to verify identity. "
+    "2. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
+    "3. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+    "4. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
+    "5. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
+    "6. Only provide a text response AFTER all tools have finished and the resource is created."
 )
 
 conversation_history = [SystemMessage(content=system_prompt)]
@@ -137,14 +157,26 @@ while True:
             response = llm.invoke(conversation_history)
             conversation_history.append(response)
             
-            # Check for tool calls
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                print(f"🛠️  Agent requesting {len(response.tool_calls)} tool(s)...")
+            # 1. Check for modern tool_calls
+            tool_calls = getattr(response, "tool_calls", [])
+            
+            # 2. Fallback to legacy function_call if tool_calls is empty
+            if not tool_calls and hasattr(response, "additional_kwargs"):
+                func_call = response.additional_kwargs.get("function_call")
+                if func_call:
+                    tool_calls = [{
+                        "name": func_call["name"],
+                        "args": json.loads(func_call["arguments"]) if isinstance(func_call["arguments"], str) else func_call["arguments"],
+                        "id": f"call_{datetime.now().strftime('%M%S')}" # Generate dummy ID
+                    }]
+
+            if tool_calls:
+                print(f"🛠️  Agent requesting {len(tool_calls)} tool(s)...")
                 
-                for tool_call in response.tool_calls:
+                for tool_call in tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
-                    tool_call_id = tool_call["id"]
+                    tool_call_id = tool_call.get("id", "legacy_call")
                     
                     print(f"  👉 Executing {tool_name}...")
                     

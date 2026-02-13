@@ -4,7 +4,7 @@ Unit tests for LLM configuration and credential handling
 import pytest
 import os
 from unittest.mock import patch, MagicMock
-from llm_config import SUPPORTED_LLMS, get_api_key
+from core.llm_config import SUPPORTED_LLMS, get_api_key
 
 
 class TestLLMConfig:
@@ -97,9 +97,9 @@ class TestLoggerConfiguration:
     
     def test_session_log_file_exists(self):
         """Verify session log file path is configured"""
-        log_file = '.agent-session.log'
+        log_file = 'logs/agent_session.log'
         # The file is created at runtime, so we just verify the path is correct
-        assert log_file == '.agent-session.log'
+        assert log_file == 'logs/agent_session.log'
     
     def test_logging_format(self):
         """Test standard logging format is used"""

@@ -17,9 +17,17 @@ import os
 import sys
 from pathlib import Path
 
+# Set up paths dynamically
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_ROOT = os.path.dirname(BIN_DIR)
+
+# Add APP_ROOT to sys.path so we can find core package
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
 # Import LLM configurations to get supported providers
 try:
-    from llm_config import SUPPORTED_LLMS
+    from core.llm_config import SUPPORTED_LLMS
 except ImportError:
     # Minimal fallback if import fails
     SUPPORTED_LLMS = {

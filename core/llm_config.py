@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 SUPPORTED_LLMS = {
     "perplexity": {
         "name": "Perplexity (Sonar)",
-        "package": "langchain_perplexity",
-        "class": "ChatPerplexity",
+        "package": "langchain_openai",
+        "class": "ChatOpenAI",
         "default_model": "sonar",
+        "base_url": "https://api.perplexity.ai",
         "requires_api_key": True,
         "env_var": "PERPLEXITY_API_KEY",
     },
@@ -37,7 +38,7 @@ SUPPORTED_LLMS = {
         "name": "Google Gemini",
         "package": "langchain_google_genai",
         "class": "ChatGoogleGenerativeAI",
-        "default_model": "gemini-1.5-flash",
+        "default_model": "gemini-1.5-pro",
         "requires_api_key": True,
         "env_var": "GOOGLE_API_KEY",
     },
@@ -85,7 +86,10 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         
     config = SUPPORTED_LLMS[provider]
     env_var = config["env_var"]
-    secret_name = f"{provider}-api-key"
+    # 1. Try Provider-specific secret name (e.g., GEMINI_AWS_SECRET_NAME)
+    # 2. Try Global secret name override (AWS_SECRET_NAME)
+    # 3. Fallback to default naming convention
+    secret_name = os.getenv(f"{provider.upper()}_AWS_SECRET_NAME") or os.getenv("AWS_SECRET_NAME") or f"{provider}-api-key"
     
     api_key = None
     
@@ -141,6 +145,7 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
                     raise ValueError("AWS region could not be resolved")
 
                 client = session.client("secretsmanager", region_name=aws_region)
+                logger.info(f"Attempting to retrieve secret '{secret_name}' from AWS region '{aws_region}'...")
                 secret = client.get_secret_value(SecretId=secret_name)
                 api_key = secret.get("SecretString")
                 if api_key:
@@ -229,6 +234,7 @@ def get_api_key(provider: str, service_name: str = "langchain-agent", preferred_
         if aws_region:
             client = boto3.client("secretsmanager", region_name=aws_region)
             try:
+                logger.info(f"Auto-detect: Attempting to retrieve secret '{secret_name}' from AWS region '{aws_region}'...")
                 secret = client.get_secret_value(SecretId=secret_name)
                 api_key = secret.get("SecretString")
                 if api_key:
@@ -271,9 +277,13 @@ def initialize_llm(provider: str, model: Optional[str] = None, preferred_source:
         raise ValueError(f"Unsupported LLM provider: {provider}. Choose from: {list(SUPPORTED_LLMS.keys())}")
     
     config = SUPPORTED_LLMS[provider]
-    model = model or config["default_model"]
-    
+    model = model or os.getenv(f"{provider.upper()}_MODEL") or os.getenv("LLM_MODEL") or config["default_model"]
+
     logger.info(f"Initializing LLM - Provider: {provider.upper()}, Model: {model}, Preferred Credential Source: {preferred_source or 'auto-detect'}")
+    
+    # Provider-specific tweaks for model names (e.g. Gemini needs 'models/' prefix sometimes)
+    if provider == "gemini" and not model.startswith("models/"):
+        model = f"models/{model}"
     
     # Get API key if required
     if config["requires_api_key"]:
@@ -290,7 +300,11 @@ def initialize_llm(provider: str, model: Optional[str] = None, preferred_source:
     llm_class = getattr(module, config["class"])
     
     # Build initialization parameters
-    llm_params = {"model": model, **kwargs}
+    llm_params = {"model" if provider != "gemini" else "model_name": model, **kwargs}
+    
+    # Provider-specific parameter adjustments
+    if provider == "perplexity":
+        llm_params["base_url"] = config.get("base_url")
     
     # Add API key if required
     if config["requires_api_key"]:

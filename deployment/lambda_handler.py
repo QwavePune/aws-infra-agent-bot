@@ -16,20 +16,30 @@ Example event structure:
 import json
 import os
 import logging
-from typing import Dict, Any, Optional
-from langchain_core.messages import HumanMessage, AIMessage
+import sys
 
 # Configure logging for Lambda
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+from typing import Dict, Any, Optional
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+# Set up paths dynamically for Lambda environment or local testing
+# This script is in deployment/, so go up one level for APP_ROOT
+DEP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_ROOT = os.path.dirname(DEP_DIR)
+
+# Add APP_ROOT to sys.path so we can find core and mcp_servers packages
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
 # Import LLM configuration
 try:
-    from llm_config import initialize_llm, select_llm_interactive
+    from core.llm_config import initialize_llm, select_llm_interactive
 except ImportError:
-    logger.error("Failed to import llm_config")
+    logger.error("Failed to import core.llm_config")
     raise
-
 
 # Import MCP server for tool support
 try:

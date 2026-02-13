@@ -1,91 +1,39 @@
-aiohappyeyeballs==2.6.1
-aiohttp==3.13.2
-aiosignal==1.4.0
-annotated-types==0.7.0
-anyio==4.11.0
-attrs==25.4.0
-aws==0.2.5
-awscrt==0.29.2
-bcrypt==5.0.0
-boto==2.49.0
-boto3==1.42.39
-botocore==1.42.39
-certifi==2025.11.12
-cffi==2.0.0
-charset-normalizer==3.4.4
-cryptography==46.0.4
-dataclasses-json==0.6.7
-decorator==5.2.1
-Deprecated==1.3.1
-distro==1.9.0
-fabric==3.2.2
-frozenlist==1.8.0
-fastapi==0.116.1
-groq==0.36.0
-h11==0.16.0
-httpcore==1.0.9
-httpx==0.28.1
-httpx-sse==0.4.3
-idna==3.11
-invoke==2.2.1
-jaraco.classes==3.4.0
-jaraco.context==6.1.0
-jaraco.functools==4.4.0
-jiter==0.12.0
-jmespath==1.1.0
-jsonpatch==1.33
-jsonpointer==3.0.0
-keyring==25.7.0
-langchain-core
-langchain-groq
-# Removed incompatible legacy package pins:
-# langchain==0.1.20
-# langchain-openai==0.1.6
-# Keeping langchain-core and modern integrations (langchain-core, langchain-perplexity)
-langchain-perplexity
-# langchain-text-splitters pinned version removed to avoid conflicts with langchain-core
-langgraph
-langgraph-checkpoint
-langgraph-prebuilt
-langgraph-sdk
-langsmith
-marshmallow==3.26.1
-more-itertools==10.8.0
-multidict==6.7.0
-mypy_extensions==1.1.0
-numpy==1.26.4
-openai==2.16.0
-orjson==3.11.4
-ormsgpack
-packaging==23.2
-paramiko==4.0.0
-prettytable
-propcache==0.4.1
-pycparser
-pydantic
-pydantic-settings
-pydantic_core
-PyNaCl
-python-dateutil
+# Core Foundations
+pydantic>=2.0.0
 python-dotenv
+boto3
+botocore
+
+# FastAPI & Web UI
+fastapi
+uvicorn
+httpx
+httpx-sse
+
+# Core AI Framework
+langchain>=0.3.0
+langchain-core
+langchain-community
+
+# Specific LLM Providers (Modern versions)
+langchain-google-genai
+langchain-openai
+langchain-groq
+# langchain-perplexity often has dependency issues, better to use via community or openai-compatible
+# langchain-perplexity
+
+# Integration & Security
+keyring
+cryptography
+pydantic-settings
+azure-identity
+azure-keyvault-secrets
+
+# Data & Utilities
 PyYAML
-regex
-requests
-requests-toolbelt
-s3transfer
-six
-sniffio
+prettytable
+marshmallow
+dataclasses-json
 SQLAlchemy
 tenacity
-tiktoken
-tqdm
-typing-inspect
-typing-inspection
-typing_extensions
-urllib3
-uvicorn==0.35.0
-wcwidth
-wrapt
-xxhash
-yarl
-zstandard
+python-dateutil

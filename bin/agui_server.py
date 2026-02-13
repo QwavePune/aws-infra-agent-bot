@@ -9,25 +9,30 @@ import logging
 import sys
 from datetime import datetime
 
+# Set up paths dynamically
+# This script is in bin/, so go up one level for APP_ROOT
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_ROOT = os.path.dirname(BIN_DIR)
+
+# Add APP_ROOT to sys.path so we can find core and mcp_servers packages
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
 # Suppress urllib3 NotOpenSSLWarning when the system ssl is LibreSSL.
 # This is a benign warning on macOS with system LibreSSL and doesn't affect runtime.
 try:
     from urllib3.exceptions import NotOpenSSLWarning
-
     warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 except Exception:
-    # If urllib3 isn't available yet or the exception class isn't present,
-    # skip silencing the warning to avoid import errors.
     pass
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
- 
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from llm_config import SUPPORTED_LLMS, initialize_llm
+from core.llm_config import SUPPORTED_LLMS, initialize_llm
 
 # Import MCP server
 try:
@@ -41,10 +46,11 @@ except ImportError as e:
     logger_temp.warning(f"MCP Server not available: {e}")
     aws_mcp = None
 
-APP_ROOT = "/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot"
+LOG_DIR = os.path.join(APP_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # Configure logging
-LOG_FILE = os.path.join(APP_ROOT, 'agui-server.log')
+LOG_FILE = os.path.join(LOG_DIR, 'agui_server.log')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-UI_DIR = f"{APP_ROOT}/ui"
+UI_DIR = os.path.join(APP_ROOT, 'ui')
 
 app = FastAPI(title="AWS Infra Agent Bot - AG-UI")
 app.mount("/static", StaticFiles(directory=UI_DIR), name="static")
@@ -328,14 +334,16 @@ async def run_agent(payload: RunRequest):
     history = conversation_store.setdefault(thread_id, [])
     if not history:
         system_prompt = (
-            "You are a strict AWS Infrastructure Provisioning Agent. "
-            "Your main purpose is to interact with AWS through the provided MCP tools. "
-            "CRITICAL: ALWAYS try to use the 'get_user_permissions' or 'get_infrastructure_state' tools before claiming you lack access or login info. "
-            "Never assume the user is logged out just because you haven't run a tool yet. "
-            "If a tool fails with a credential error, then and only then should you ask the user to check their 'CLI Login'. "
-            "To build infrastructure: 1. Generate the project/config 2. Run terraform_plan 3. Run terraform_apply. "
-            "If user says 'apply' or 'execute', you MUST call 'terraform_apply' with the correct project name. "
-            "Be concise and technical. Report tool outputs directly."
+            "You are an AWS Infrastructure Execution Engine. "
+            "Your ONLY output should be a tool call when an action is required. "
+            "DO NOT explain what you are going to do. DO NOT ask for permission. DO NOT ask for tool outputs. "
+            "THE SYSTEM AUTOMATICALLY EXECUTES YOUR TOOL CALLS AND PROVIDES THE DATA. "
+            "1. For any AWS request, first CALL 'get_user_permissions' to verify identity. "
+            "2. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
+            "3. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+            "4. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
+            "5. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
+            "6. Only provide a text response AFTER all tools have finished and the resource is created."
         )
         history.append(SystemMessage(content=system_prompt))
         logger.info(f"[{run_id}] System prompt initialized")

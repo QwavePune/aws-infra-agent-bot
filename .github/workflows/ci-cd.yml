@@ -10,7 +10,7 @@ on:
       - 'fix/**'
       - 'bugfix/**'
       - 'release/**'
-      - 'hotfix/**'Exactly
+      - 'hotfix/**'
   pull_request:
     branches:
       - main

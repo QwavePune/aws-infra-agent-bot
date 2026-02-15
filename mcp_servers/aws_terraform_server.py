@@ -239,7 +239,7 @@ class TerraformManager:
         
         return self._run_terraform(cmd, project_path)
     
-    def destroy(self, project_dir: str, auto_approve: bool = False) -> Dict[str, Any]:
+    def destroy(self, project_dir: str, auto_approve: bool = True) -> Dict[str, Any]:
         """Run terraform destroy"""
         project_path = self.workspace_dir / project_dir
         
@@ -251,13 +251,27 @@ class TerraformManager:
                 "error": f"Project directory '{project_dir}' not found. Use terraform_plan first to create the project."
             }
         
-        cmd = ["terraform", "destroy", "-input=false"]
-        if auto_approve:
-            cmd.append("-auto-approve")
+        # Remove any existing tfplan file to avoid conflicts
+        plan_file = project_path / "tfplan"
+        if plan_file.exists():
+            try:
+                plan_file.unlink()
+                logger.info(f"Removed existing tfplan file before destroy: {plan_file}")
+            except Exception as e:
+                logger.warning(f"Could not remove tfplan file: {e}")
+        
+        # Build destroy command - always use auto_approve flag
+        cmd = ["terraform", "destroy", "-input=false", "-auto-approve"]
         
         try:
-            # Inherit environment for AWS credentials
+            # Inherit current env and overlay with active session credentials
             env = os.environ.copy()
+            if self.rbac:
+                creds = self.rbac.get_credentials_env()
+                env.update(creds)
+                if "AWS_PROFILE" in env:
+                    # Remove AWS_PROFILE to ensure injected credentials are used
+                    del env["AWS_PROFILE"]
             
             logger.info(f"EXECUTION: Real AWS Destruction - Running command: {' '.join(cmd)} in {project_path}")
             result = subprocess.run(
@@ -951,10 +965,222 @@ class MCPAWSManagerServer:
             }
         ]
     
+    def _parse_resource_identifier(self, resource_id: str) -> Optional[Dict[str, str]]:
+        """
+        Parse resource identifier to extract resource type and ID.
+        
+        Supports:
+        - ARNs: arn:aws:ec2:region:account:instance/i-xxxxx
+        - Resource IDs: i-xxxxx, vpc-xxxxx, bucket-name, etc.
+        
+        Returns:
+            Dict with keys: resource_type, resource_id, region (if available)
+            None if unable to parse
+        """
+        if not resource_id:
+            return None
+        
+        # Handle ARN format
+        if resource_id.startswith('arn:'):
+            try:
+                parts = resource_id.split(':')
+                if len(parts) < 6:
+                    return None
+                
+                service = parts[2]  # ec2, s3, rds, dynamodb, lambda, etc.
+                region = parts[3]
+                account = parts[4]
+                resource_part = ':'.join(parts[5:])  # Handle resources with colons
+                
+                # Parse resource_part to extract resource type and ID
+                # Examples:
+                # instance/i-xxxxx -> (instance, i-xxxxx)
+                # bucket/name -> (bucket, name)
+                # table/name -> (table, name)
+                
+                if '/' in resource_part:
+                    resource_type, resource_id_part = resource_part.split('/', 1)
+                else:
+                    # For some services like S3, it's just the bucket name
+                    resource_type = 'bucket' if service == 's3' else 'unknown'
+                    resource_id_part = resource_part
+                
+                return {
+                    'service': service,
+                    'resource_type': resource_type,
+                    'resource_id': resource_id_part,
+                    'region': region if region else None,
+                    'account': account
+                }
+            except Exception as e:
+                logger.warning(f"Failed to parse ARN: {resource_id}: {e}")
+                return None
+        
+        # Handle resource ID patterns
+        resource_patterns = {
+            'i-': ('ec2', 'instance'),
+            'vpc-': ('ec2', 'vpc'),
+            'sg-': ('ec2', 'security-group'),
+            'subnet-': ('ec2', 'subnet'),
+            'nat-': ('ec2', 'nat-gateway'),
+            'eni-': ('ec2', 'network-interface'),
+            'vol-': ('ec2', 'volume'),
+            'snap-': ('ec2', 'snapshot'),
+            'ami-': ('ec2', 'image'),
+            'rds-': ('rds', 'db-instance'),
+            'arn:aws:rds:': ('rds', 'db-instance'),
+            'lambda-': ('lambda', 'function'),
+        }
+        
+        # Check if it's a known pattern
+        for prefix, (service, resource_type) in resource_patterns.items():
+            if resource_id.startswith(prefix):
+                return {
+                    'service': service,
+                    'resource_type': resource_type,
+                    'resource_id': resource_id,
+                    'region': None,
+                    'account': None
+                }
+        
+        # If it doesn't match known patterns, it might be:
+        # - S3 bucket name
+        # - DynamoDB table name
+        # - Lambda function name
+        # - RDS instance name
+        # Try to identify by checking AWS
+        return None
+    
+    def _find_project_by_resource_id(self, resource_id: str) -> Optional[str]:
+        """
+        Find the Terraform project directory that manages a given AWS resource.
+        
+        Supports any AWS resource:
+        - EC2 (instances, VPCs, security groups, etc.)
+        - S3 buckets
+        - RDS databases
+        - DynamoDB tables
+        - Lambda functions
+        - And more...
+        
+        Args:
+            resource_id: AWS resource identifier (ARN, resource ID, or name)
+        
+        Returns:
+            Project directory name if found, None otherwise
+        """
+        if not resource_id:
+            return None
+        
+        # Parse the resource identifier
+        parsed = self._parse_resource_identifier(resource_id)
+        
+        logger.info(f"Searching for resource: {resource_id}")
+        if parsed:
+            logger.info(f"Parsed as: service={parsed.get('service')}, type={parsed.get('resource_type')}, id={parsed.get('resource_id')}")
+        
+        # Search through terraform state files for this resource
+        workspace_dir = self.terraform.workspace_dir
+        if not workspace_dir.exists():
+            logger.warning(f"Workspace directory does not exist: {workspace_dir}")
+            return None
+        
+        for project_dir in workspace_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            
+            state_file = project_dir / "terraform.tfstate"
+            if not state_file.exists():
+                continue
+            
+            try:
+                with open(state_file, 'r') as f:
+                    state_data = json.load(f)
+                
+                # Check if this state file contains the resource
+                resources = state_data.get('resources', [])
+                for resource in resources:
+                    resource_type = resource.get('type')
+                    
+                    # Check instances in this resource type
+                    for instance in resource.get('instances', []):
+                        attributes = instance.get('attributes', {})
+                        
+                        # Try multiple ways to match the resource:
+                        # 1. By ID (e.g., instance ID, bucket name)
+                        if attributes.get('id') == resource_id:
+                            project_name = project_dir.name
+                            logger.info(f"Found resource {resource_id} managed by project: {project_name} (matched by id)")
+                            return project_name
+                        
+                        # 2. By ARN
+                        if attributes.get('arn') == resource_id:
+                            project_name = project_dir.name
+                            logger.info(f"Found resource {resource_id} managed by project: {project_name} (matched by arn)")
+                            return project_name
+                        
+                        # 3. For parsed resources, check specific attributes
+                        if parsed:
+                            resource_id_from_arn = parsed.get('resource_id')
+                            
+                            # Check by parsed resource ID
+                            if attributes.get('id') == resource_id_from_arn:
+                                project_name = project_dir.name
+                                logger.info(f"Found resource {resource_id_from_arn} managed by project: {project_name} (matched by parsed id)")
+                                return project_name
+                            
+                            # For S3 buckets, check bucket name
+                            if parsed.get('service') == 's3' and attributes.get('bucket') == resource_id_from_arn:
+                                project_name = project_dir.name
+                                logger.info(f"Found S3 bucket {resource_id_from_arn} managed by project: {project_name}")
+                                return project_name
+                            
+                            # For DynamoDB tables, check table name
+                            if parsed.get('service') == 'dynamodb' and attributes.get('name') == resource_id_from_arn:
+                                project_name = project_dir.name
+                                logger.info(f"Found DynamoDB table {resource_id_from_arn} managed by project: {project_name}")
+                                return project_name
+                            
+                            # For Lambda functions, check function name
+                            if parsed.get('service') == 'lambda' and attributes.get('function_name') == resource_id_from_arn:
+                                project_name = project_dir.name
+                                logger.info(f"Found Lambda function {resource_id_from_arn} managed by project: {project_name}")
+                                return project_name
+                            
+                            # For RDS instances, check identifier
+                            if parsed.get('service') == 'rds' and attributes.get('identifier') == resource_id_from_arn:
+                                project_name = project_dir.name
+                                logger.info(f"Found RDS instance {resource_id_from_arn} managed by project: {project_name}")
+                                return project_name
+            
+            except Exception as e:
+                logger.debug(f"Error reading state file {state_file}: {e}")
+                continue
+        
+        logger.warning(f"Resource {resource_id} not found in any Terraform state files")
+        return None
+    
+    def _find_project_by_instance_id(self, instance_id: str, region: Optional[str] = None) -> Optional[str]:
+        """
+        Deprecated: Use _find_project_by_resource_id instead.
+        Kept for backward compatibility.
+        """
+        return self._find_project_by_resource_id(instance_id)
+    
     def _resolve_project_name(self, project_name: str) -> str:
         """
         Resolve project name by checking if it exists directly or with common prefixes.
-        This helps when agents forget to include the resource-type prefix.
+        Also checks if the input is an AWS resource ID/ARN and finds the corresponding project.
+        
+        Supports:
+        - Direct project names: 'ec2_t3.micro_ap-south-1'
+        - Instance IDs: 'i-00ee2b589f0f4e455'
+        - VPC IDs: 'vpc-xxxxx'
+        - S3 buckets: 'bucket-name' or 'arn:aws:s3:::bucket-name'
+        - RDS instances: 'db-instance-name'
+        - DynamoDB tables: 'table-name'
+        - ARNs: Full ARNs for any resource type
+        - Abbreviated names: 't3.micro_ap-south-1' (tries 'ec2_' prefix)
         """
         if not project_name:
             return project_name
@@ -962,15 +1188,37 @@ class MCPAWSManagerServer:
         # 1. Try exact match
         if (self.terraform.workspace_dir / project_name).exists():
             return project_name
-            
-        # 2. Try common prefixes
-        prefixes = ["s3_", "ec2_", "vpc_", "rds_", "lambda_"]
+        
+        # 2. Check if it's an AWS resource ID or ARN (starts with common prefixes or 'arn:')
+        if (project_name.startswith('i-') or 
+            project_name.startswith('vpc-') or 
+            project_name.startswith('sg-') or 
+            project_name.startswith('subnet-') or 
+            project_name.startswith('arn:aws:') or
+            project_name.startswith('nat-') or
+            project_name.startswith('eni-') or
+            project_name.startswith('vol-') or
+            project_name.startswith('snap-') or
+            project_name.startswith('ami-') or
+            project_name.startswith('rds-')):
+            found_project = self._find_project_by_resource_id(project_name)
+            if found_project:
+                return found_project
+        
+        # 3. Try common prefixes for abbreviated names
+        prefixes = ["s3_", "ec2_", "vpc_", "rds_", "lambda_", "dynamodb_"]
         for prefix in prefixes:
             if not project_name.startswith(prefix):
                 candidate = f"{prefix}{project_name}"
                 if (self.terraform.workspace_dir / candidate).exists():
                     logger.info(f"Resolved project '{project_name}' to '{candidate}'")
                     return candidate
+        
+        # 4. If none of the above worked, it might be a resource name (S3, DynamoDB, etc.)
+        # Try searching by resource name as last resort
+        found_project = self._find_project_by_resource_id(project_name)
+        if found_project:
+            return found_project
                     
         return project_name
 
@@ -1213,7 +1461,8 @@ class MCPAWSManagerServer:
         if not project_name:
             return {"success": False, "error": "project_name is required"}
         
-        auto_approve = params.get("auto_approve", False)
+        # Default to auto_approve=True for convenience
+        auto_approve = params.get("auto_approve", True)
         return self.terraform.destroy(project_name, auto_approve)
     
     def _get_infrastructure_state(self, params: Dict[str, Any]) -> Dict[str, Any]:

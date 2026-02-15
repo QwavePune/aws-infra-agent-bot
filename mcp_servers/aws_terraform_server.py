@@ -962,6 +962,48 @@ class MCPAWSManagerServer:
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "parse_mermaid_architecture",
+                "description": "Parse a Mermaid diagram to extract AWS architecture components and relationships",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mermaid_content": {
+                            "type": "string",
+                            "description": "Mermaid diagram syntax (e.g., graph LR...)"
+                        }
+                    },
+                    "required": ["mermaid_content"]
+                }
+            },
+            {
+                "name": "generate_terraform_from_architecture",
+                "description": "Generate Terraform code from a parsed architecture",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "architecture": {
+                            "type": "object",
+                            "description": "Parsed architecture dict with resources and relationships"
+                        }
+                    },
+                    "required": ["architecture"]
+                }
+            },
+            {
+                "name": "deploy_architecture",
+                "description": "Generate and deploy AWS infrastructure from architecture (one-shot: generate + plan)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "architecture": {
+                            "type": "object",
+                            "description": "Parsed architecture dict with resources and relationships"
+                        }
+                    },
+                    "required": ["architecture"]
+                }
             }
         ]
     
@@ -1249,7 +1291,10 @@ class MCPAWSManagerServer:
             "terraform_apply": self._terraform_apply,
             "terraform_destroy": self._terraform_destroy,
             "get_infrastructure_state": self._get_infrastructure_state,
-            "get_user_permissions": self._get_user_permissions
+            "get_user_permissions": self._get_user_permissions,
+            "parse_mermaid_architecture": self._parse_mermaid_architecture,
+            "generate_terraform_from_architecture": self._generate_terraform_from_architecture,
+            "deploy_architecture": self._deploy_architecture
         }
         
         handler = handlers.get(tool_name)
@@ -1483,6 +1528,115 @@ class MCPAWSManagerServer:
             "user_info": user_info,
             "allowed_regions": regions
         }
+    
+    def _parse_mermaid_architecture(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse Mermaid diagram to extract architecture"""
+        from core.architecture_parser import ArchitectureParser
+        
+        mermaid_content = params.get("mermaid_content")
+        if not mermaid_content:
+            return {"success": False, "error": "mermaid_content is required"}
+        
+        try:
+            parser = ArchitectureParser()
+            result = parser.parse_mermaid_diagram(mermaid_content)
+            result["success"] = True
+            return result
+        except Exception as e:
+            logger.error(f"Error parsing mermaid: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to parse mermaid diagram: {str(e)}"
+            }
+    
+    def _generate_terraform_from_architecture(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate Terraform code from parsed architecture"""
+        from core.architecture_parser import ArchitectureParser
+        
+        architecture = params.get("architecture")
+        if not architecture:
+            return {"success": False, "error": "architecture dict is required"}
+        
+        try:
+            # Try to get LLM instance for better code generation
+            llm_instance = None
+            try:
+                from core.llm_config import initialize_llm
+                llm_instance = initialize_llm("claude", temperature=0)
+            except Exception as e:
+                logger.warning(f"Could not initialize LLM for terraform generation: {e}")
+            
+            parser = ArchitectureParser(llm_provider="claude", llm_instance=llm_instance)
+            result = parser.architecture_to_terraform(architecture)
+            return result
+        except Exception as e:
+            logger.error(f"Error generating terraform: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to generate terraform: {str(e)}"
+            }
+    
+    def _deploy_architecture(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy architecture from parsed resources (generate + plan)"""
+        from core.architecture_parser import ArchitectureParser
+        
+        architecture = params.get("architecture")
+        if not architecture:
+            return {"success": False, "error": "architecture dict is required"}
+        
+        try:
+            # Generate Terraform
+            llm_instance = None
+            try:
+                from core.llm_config import initialize_llm
+                llm_instance = initialize_llm("claude", temperature=0)
+            except Exception as e:
+                logger.warning(f"Could not initialize LLM: {e}")
+            
+            parser = ArchitectureParser(llm_provider="claude", llm_instance=llm_instance)
+            gen_result = parser.architecture_to_terraform(architecture)
+            
+            if not gen_result.get("success"):
+                return gen_result
+            
+            project_name = gen_result.get("project_name")
+            terraform_code = gen_result.get("terraform_code")
+            
+            # Save terraform code to file
+            project_dir = self.terraform.workspace_dir / project_name
+            project_dir.mkdir(parents=True, exist_ok=True)
+            
+            main_tf = project_dir / "main.tf"
+            main_tf.write_text(terraform_code)
+            
+            logger.info(f"Terraform code saved to {project_dir}/main.tf")
+            
+            # Initialize and plan
+            init_result = self.terraform.init(project_name)
+            if not init_result.get("success"):
+                return {
+                    "success": False,
+                    "error": "Terraform init failed",
+                    "details": init_result,
+                    "project_name": project_name
+                }
+            
+            plan_result = self.terraform.plan(project_name)
+            
+            return {
+                "success": plan_result.get("success", False),
+                "project_name": project_name,
+                "terraform_code": terraform_code,
+                "plan_result": plan_result,
+                "message": f"Infrastructure deployed and planned. Use terraform_apply to create resources."
+            }
+        
+        except Exception as e:
+            logger.error(f"Error deploying architecture: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to deploy architecture: {str(e)}"
+            }
 
 
 # Singleton instance

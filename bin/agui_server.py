@@ -8,6 +8,8 @@ import os
 import logging
 import sys
 from datetime import datetime
+import tempfile
+from pathlib import Path
 
 # Set up paths dynamically
 # This script is in bin/, so go up one level for APP_ROOT
@@ -26,13 +28,14 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
+from core.architecture_parser import ArchitectureParser
 
 # Import MCP server
 try:
@@ -495,6 +498,277 @@ async def run_agent(payload: RunRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/architecture/parse-image")
+async def parse_architecture_image(
+    file: UploadFile = File(...),
+    provider: str = "claude",
+    threadId: Optional[str] = None
+):
+    """
+    Parse an AWS architecture image and extract infrastructure components
+    
+    Supports: PNG, JPG, GIF, WebP
+    Uses vision capabilities to analyze the diagram
+    """
+    logger.info(f"API Request: POST /api/architecture/parse-image - Provider: {provider}")
+    
+    threadId = threadId or str(uuid.uuid4())
+    
+    try:
+        # Validate file type
+        allowed_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+        if file.content_type not in allowed_types:
+            logger.warning(f"Invalid file type: {file.content_type}")
+            return JSONResponse(
+                {"success": False, "error": f"Invalid file type. Allowed: PNG, JPG, GIF, WebP"},
+                status_code=400
+            )
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        try:
+            # Initialize LLM if not cached
+            if provider not in llm_cache:
+                llm_instance = initialize_llm(provider, temperature=0)
+                llm_cache[provider] = llm_instance
+            
+            llm_instance = llm_cache[provider]
+            
+            # Parse architecture
+            parser = ArchitectureParser(llm_provider=provider, llm_instance=llm_instance)
+            result = parser.parse_architecture_image(tmp_path)
+            
+            if result.get("success"):
+                logger.info(f"Architecture image parsed successfully for thread {threadId}")
+            
+            return JSONResponse(result)
+        
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+    
+    except Exception as e:
+        logger.error(f"Error parsing architecture image: {str(e)}")
+        return JSONResponse(
+            {"success": False, "error": f"Failed to parse image: {str(e)}"},
+            status_code=500
+        )
+
+
+@app.post("/api/architecture/parse-mermaid")
+async def parse_mermaid_diagram(
+    payload: Dict[str, str],
+    provider: str = "claude",
+    threadId: Optional[str] = None
+):
+    """
+    Parse a Mermaid diagram string and extract infrastructure components
+    
+    Mermaid format:
+    graph LR
+        VPC["VPC"]
+        EC2["EC2 Instance"]
+        S3["S3 Bucket"]
+        VPC --> EC2
+        EC2 --> S3
+    """
+    logger.info(f"API Request: POST /api/architecture/parse-mermaid")
+    
+    threadId = threadId or str(uuid.uuid4())
+    mermaid_content = payload.get("mermaid", "")
+    
+    if not mermaid_content:
+        return JSONResponse(
+            {"success": False, "error": "mermaid content is required"},
+            status_code=400
+        )
+    
+    try:
+        # Parse mermaid
+        parser = ArchitectureParser(llm_provider=provider)
+        result = parser.parse_mermaid_diagram(mermaid_content)
+        
+        logger.info(f"Mermaid diagram parsed successfully for thread {threadId}")
+        return JSONResponse(result)
+    
+    except Exception as e:
+        logger.error(f"Error parsing mermaid diagram: {str(e)}")
+        return JSONResponse(
+            {"success": False, "error": f"Failed to parse mermaid: {str(e)}"},
+            status_code=500
+        )
+
+
+@app.post("/api/architecture/generate-terraform")
+async def generate_terraform_from_architecture(
+    payload: Dict[str, Any],
+    provider: str = "claude",
+    threadId: Optional[str] = None
+):
+    """
+    Generate Terraform code from a parsed architecture
+    
+    Expects parsed architecture dict from parse_mermaid or parse_image
+    """
+    logger.info(f"API Request: POST /api/architecture/generate-terraform")
+    
+    threadId = threadId or str(uuid.uuid4())
+    architecture = payload.get("architecture", {})
+    
+    if not architecture:
+        return JSONResponse(
+            {"success": False, "error": "architecture dict is required"},
+            status_code=400
+        )
+    
+    try:
+        # Initialize LLM if not cached
+        if provider not in llm_cache:
+            llm_instance = initialize_llm(provider, temperature=0)
+            llm_cache[provider] = llm_instance
+        
+        llm_instance = llm_cache[provider]
+        
+        # Generate Terraform
+        parser = ArchitectureParser(llm_provider=provider, llm_instance=llm_instance)
+        result = parser.architecture_to_terraform(architecture)
+        
+        if result.get("success"):
+            logger.info(f"Terraform generated successfully for thread {threadId}: {result.get('project_name')}")
+        
+        return JSONResponse(result)
+    
+    except Exception as e:
+        logger.error(f"Error generating terraform: {str(e)}")
+        return JSONResponse(
+            {"success": False, "error": f"Failed to generate terraform: {str(e)}"},
+            status_code=500
+        )
+
+
+@app.post("/api/architecture/deploy")
+async def deploy_architecture(
+    payload: Dict[str, Any],
+    provider: str = "claude",
+    threadId: Optional[str] = None
+):
+    """
+    Generate Terraform from architecture and deploy it using terraform_plan
+    
+    One-shot deployment endpoint that:
+    1. Generates Terraform code
+    2. Creates project directory
+    3. Runs terraform plan (ready for apply)
+    """
+    logger.info(f"API Request: POST /api/architecture/deploy")
+    
+    threadId = threadId or str(uuid.uuid4())
+    architecture = payload.get("architecture", {})
+    
+    if not architecture:
+        return JSONResponse(
+            {"success": False, "error": "architecture dict is required"},
+            status_code=400
+        )
+    
+    try:
+        # Initialize LLM
+        if provider not in llm_cache:
+            llm_instance = initialize_llm(provider, temperature=0)
+            llm_cache[provider] = llm_instance
+        
+        llm_instance = llm_cache[provider]
+        
+        # Generate Terraform
+        parser = ArchitectureParser(llm_provider=provider, llm_instance=llm_instance)
+        gen_result = parser.architecture_to_terraform(architecture)
+        
+        if not gen_result.get("success"):
+            return JSONResponse(gen_result, status_code=400)
+        
+        project_name = gen_result.get("project_name")
+        terraform_code = gen_result.get("terraform_code")
+        
+        # Create project directory and save terraform code
+        terraform_workspace = Path(APP_ROOT) / "terraform_workspace"
+        terraform_workspace.mkdir(exist_ok=True)
+        
+        project_dir = terraform_workspace / project_name
+        project_dir.mkdir(exist_ok=True)
+        
+        main_tf = project_dir / "main.tf"
+        main_tf.write_text(terraform_code)
+        
+        logger.info(f"Terraform code saved to {project_dir}/main.tf")
+        
+        # Initialize terraform and run plan
+        if not MCP_AVAILABLE or not aws_mcp:
+            return JSONResponse(
+                {
+                    "success": True,
+                    "project_name": project_name,
+                    "terraform_code": terraform_code,
+                    "message": "Terraform code generated but MCP server not available for planning. Please run terraform_plan manually.",
+                    "project_path": str(project_dir)
+                }
+            )
+        
+        try:
+            # Run terraform init
+            init_result = aws_mcp.terraform.init(project_name)
+            if not init_result.get("success"):
+                return JSONResponse(
+                    {
+                        "success": False,
+                        "error": "Terraform init failed",
+                        "details": init_result,
+                        "project_name": project_name
+                    },
+                    status_code=400
+                )
+            
+            # Run terraform plan
+            plan_result = aws_mcp.terraform.plan(project_name)
+            
+            return JSONResponse(
+                {
+                    "success": plan_result.get("success", False),
+                    "project_name": project_name,
+                    "terraform_code": terraform_code,
+                    "plan_result": plan_result,
+                    "message": f"Terraform plan generated for project: {project_name}. Use terraform_apply to deploy.",
+                    "project_path": str(project_dir)
+                }
+            )
+        
+        except Exception as e:
+            logger.error(f"Error running terraform init/plan: {e}")
+            return JSONResponse(
+                {
+                    "success": True,
+                    "project_name": project_name,
+                    "terraform_code": terraform_code,
+                    "message": f"Terraform code generated. Error running plan: {str(e)}. Run terraform_plan manually.",
+                    "project_path": str(project_dir),
+                    "plan_error": str(e)
+                }
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in deploy_architecture: {str(e)}")
+        return JSONResponse(
+            {"success": False, "error": f"Failed to deploy architecture: {str(e)}"},
+            status_code=500
+        )
 
 
 if __name__ == "__main__":

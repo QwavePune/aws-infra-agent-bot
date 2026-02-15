@@ -9,7 +9,71 @@
 </head>
 
 <body>
-  <div class="app-shell">
+  <!-- Login Modal Overlay -->
+  <div id="loginModal" class="modal-overlay modal-active">
+    <div class="modal-container login-container">
+      <div class="modal-header">
+        <h1>AWS Infra Agent</h1>
+        <p class="modal-subtitle">Secure Infrastructure Automation</p>
+      </div>
+      
+      <div class="modal-body">
+        <div id="basicLoginForm" class="login-form" style="display: block;">
+          <label for="usernameInput">Username or Email</label>
+          <input 
+            type="text" 
+            id="usernameInput" 
+            placeholder="Enter your username or email" 
+            autocomplete="username"
+          />
+          
+          <label for="passwordInput" style="margin-top: 16px;">Password</label>
+          <input 
+            type="password" 
+            id="passwordInput" 
+            placeholder="Enter your password"
+            autocomplete="current-password"
+          />
+          
+          <button id="basicLoginBtn" class="btn-primary" style="margin-top: 24px; width: 100%;">
+            Sign In
+          </button>
+          
+          <div id="loginError" class="alert-error" style="display: none; margin-top: 15px;"></div>
+          <div id="loginLoading" class="loading-spinner" style="display: none; margin-top: 15px;">
+            <span>Authenticating...</span>
+          </div>
+          
+          <div class="login-divider" style="margin-top: 24px;">
+            <span>or</span>
+          </div>
+          
+          <label for="ssoProfileInput" style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">SSO Profile (optional)</label>
+          <input type="text" id="ssoProfileInput" placeholder="default" style="padding:8px; border-radius:8px; border:1px solid var(--border);" />
+
+          <button id="ssoLoginBtn" class="btn-secondary" style="margin-top: 16px; width: 100%;">
+            Sign In with AWS SSO (Open Terminal)
+          </button>
+          
+          <div id="ssoStatus" style="display: none; margin-top: 14px;">
+            <div id="ssoProgress" class="progress" style="height:10px; background:var(--panel-alt); border-radius:6px; overflow:hidden;">
+              <div id="ssoProgressBar" style="width:0%; height:100%; background:linear-gradient(90deg,var(--brand),var(--brand-strong)); transition: width 0.3s;"></div>
+            </div>
+            <div id="ssoStatusText" style="margin-top:8px; font-size:13px; color:var(--text-muted);">Waiting for SSO...</div>
+            <button id="ssoDoneBtn" class="btn-secondary" style="margin-top:10px;">I've completed login</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="modal-footer">
+        <p class="modal-hint">
+          Secure login · Your credentials are encrypted in transit
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-shell" id="appShell" style="display: none;">
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark">AWS Infra Agent</span>
@@ -28,18 +92,20 @@
           </select>
         </div>
         <div class="model-picker">
-          <button id="awsLoginBtn" class="btn-primary">CLI Login</button>
           <button id="awsConsoleBtn" class="btn-secondary">AWS Console</button>
+          <button id="switchProfileBtn" class="btn-secondary">Switch Profile</button>
         </div>
         <div id="awsIdentity" class="status-pill"
           style="display: none; background: #232f3e; color: white; border: none;">
           <span id="awsAccount">AWS: ---</span>
         </div>
-        <div class="profile">
-          <div class="avatar">PK</div>
-          <div class="profile-meta">
-            <span class="profile-name">Parag</span>
-            <span class="profile-role">Owner</span>
+        <div class="profile-menu">
+          <button id="profileMenuBtn" class="avatar-btn">
+            <div class="avatar">PK</div>
+          </button>
+          <div id="profileDropdown" class="dropdown-menu" style="display: none;">
+            <a href="#" id="profileViewLink">View Profile</a>
+            <a href="#" id="logoutBtn">Logout</a>
           </div>
         </div>
       </div>

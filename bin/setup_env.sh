@@ -23,9 +23,9 @@ fi
 source "$VENV_DIR/bin/activate"
 
 echo "Upgrading pip..."
-python -m pip install --upgrade pip
+python3 -m pip install --upgrade pip
 
 echo "Installing pinned requirements..."
-pip install -r "$REQUIREMENTS"
+pip3 install -r "$REQUIREMENTS"
 
 echo "Done. To use the environment, run: source venv/bin/activate"

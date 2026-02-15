@@ -9,6 +9,7 @@ fastapi
 uvicorn
 httpx
 httpx-sse
+requests
 
 # Core AI Framework
 langchain>=0.3.0

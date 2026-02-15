@@ -10,7 +10,7 @@ on:
       - 'fix/**'
       - 'bugfix/**'
       - 'release/**'
-      - 'hotfix/**'Exactly
+      - 'hotfix/**'
   pull_request:
     branches:
       - main
@@ -95,7 +95,7 @@ jobs:
       
       - name: Run unit tests with coverage
         run: |
-          pytest tests/ -v --cov=. --cov-report=xml --cov-report=html || true
+          pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3

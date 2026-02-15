@@ -30,6 +30,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import requests
+import boto3
+import platform
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
@@ -268,6 +271,168 @@ async def trigger_aws_login(payload: Dict[str, str] = None):
             })
         except:
              pass
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/aws/login_shell")
+async def trigger_aws_login_shell(payload: Dict[str, str] = None):
+    """Open a local terminal window and run `aws sso login --profile <profile>` so the user can interactively complete SSO.
+
+    This attempts to launch the user's default terminal. Behavior varies by OS.
+    """
+    profile = (payload or {}).get("profile") or os.environ.get("AWS_PROFILE", "default")
+    logger.info(f"API Request: POST /api/aws/login_shell - Profile: {profile}")
+    try:
+        system = platform.system().lower()
+        if system == "darwin":
+            # macOS: prefer iTerm if available, otherwise fall back to Terminal.app
+            try:
+                if os.path.exists('/Applications/iTerm.app'):
+                    # Use AppleScript to create a new iTerm window and run the command
+                    cmd = [
+                        "osascript",
+                        "-e",
+                        'tell application "iTerm"'
+                    ]
+                    # create window and run in current session
+                    cmd += [
+                        "-e",
+                        'create window with default profile',
+                        "-e",
+                        f'tell current session of current window to write text "aws sso login --profile {profile}"',
+                        "-e",
+                        'end tell'
+                    ]
+                    subprocess.Popen(cmd)
+                else:
+                    # Terminal.app fallback
+                    cmd = [
+                        "osascript",
+                        "-e",
+                        f'tell application "Terminal" to do script "aws sso login --profile {profile}"'
+                    ]
+                    subprocess.Popen(cmd)
+            except Exception:
+                # Best-effort fallback to Terminal
+                subprocess.Popen([
+                    "osascript",
+                    "-e",
+                    f'tell application "Terminal" to do script "aws sso login --profile {profile}"'
+                ])
+        elif system == "linux":
+            # Try common terminals
+            try:
+                subprocess.Popen(["gnome-terminal", "--", "bash", "-lc", f"aws sso login --profile {profile}; exec bash"])
+            except Exception:
+                try:
+                    subprocess.Popen(["konsole", "-e", f"bash -lc 'aws sso login --profile {profile}; exec bash'"])
+                except Exception:
+                    # Fallback: run in background (won't be interactive)
+                    subprocess.Popen(["bash", "-lc", f"aws sso login --profile {profile} &"], shell=True)
+        elif system.startswith("win") or system == "windows":
+            # Windows: use start to open cmd.exe
+            subprocess.Popen(["cmd.exe", "/c", f"start cmd /k \"aws sso login --profile {profile}\""])
+        else:
+            # Unknown: try to run in background
+            subprocess.Popen(["aws", "sso", "login", "--profile", profile])
+
+        return JSONResponse({"success": True, "message": "Opened terminal to run AWS SSO login."})
+    except Exception as e:
+        logger.error(f"Failed to open shell for AWS login: {e}", exc_info=True)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: Dict[str, str]):
+    """Simple username/password auth for the UI.
+
+    NOTE: This is a demo/local auth and does not authenticate against AWS. Use SSO for real AWS access.
+    """
+    username = payload.get("username")
+    password = payload.get("password")
+    logger.info(f"API Request: POST /api/auth/login - username={username}")
+    # Simple local check -- replace with real auth backend as needed
+    demo_users = {"admin": "admin", "user": "password"}
+    if username in demo_users and demo_users[username] == password:
+        return JSONResponse({"success": True, "username": username})
+    else:
+        return JSONResponse({"success": False, "error": "Invalid username or password"})
+
+
+@app.post("/api/aws/console")
+async def get_aws_console_url(payload: Dict[str, str] = None):
+    """Generate a federated AWS Console signin URL using temporary credentials.
+
+    Optional payload keys:
+      - role_arn: ARN of role to assume (optional)
+      - duration_seconds: STS session duration (optional)
+    """
+    payload = payload or {}
+    role_arn = payload.get("role_arn")
+    duration = int(payload.get("duration_seconds", 3600))
+
+    try:
+        # Try to obtain temporary credentials. Prefer assume_role if role_arn provided.
+        sts = boto3.client("sts")
+        if role_arn:
+            resp = sts.assume_role(RoleArn=role_arn, RoleSessionName="agui-session", DurationSeconds=duration)
+            creds = resp["Credentials"]
+        else:
+            # Use GetSessionToken to obtain credentials for the current principal
+            resp = sts.get_session_token(DurationSeconds=duration)
+            creds = resp["Credentials"]
+
+        session_json = {
+            "sessionId": creds["AccessKeyId"],
+            "sessionKey": creds["SecretAccessKey"],
+            "sessionToken": creds.get("SessionToken", "")
+        }
+
+        # Request SigninToken from AWS federation endpoint
+        federation_url = "https://signin.aws.amazon.com/federation"
+        r = requests.get(federation_url, params={
+            "Action": "getSigninToken",
+            "Session": json.dumps(session_json)
+        }, timeout=10)
+        r.raise_for_status()
+        token = r.json().get("SigninToken")
+        if not token:
+            raise Exception("Failed to obtain SigninToken")
+
+        destination = "https://console.aws.amazon.com/"
+        login_url = f"{federation_url}?Action=login&Issuer=agui&Destination={requests.utils.requote_uri(destination)}&SigninToken={token}"
+
+        return JSONResponse({"success": True, "url": login_url})
+    except Exception as e:
+        logger.error(f"Failed to build AWS console URL: {e}", exc_info=True)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Clear session and logout the user"""
+    logger.info("API Request: POST /api/auth/logout")
+    try:
+        # Clear AWS_PROFILE from environment
+        if "AWS_PROFILE" in os.environ:
+            del os.environ["AWS_PROFILE"]
+        
+        # Optionally clear credentials from environment (be careful with this)
+        for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]:
+            if key in os.environ:
+                del os.environ[key]
+        
+        # Reset MCP RBAC
+        if MCP_AVAILABLE and aws_mcp:
+            aws_mcp.rbac.initialize()
+        
+        # Clear conversation store for this session
+        conversation_store.clear()
+        
+        logger.info("User logged out successfully")
+        return JSONResponse({"success": True, "message": "Logged out successfully"})
+    except Exception as e:
+        logger.error(f"Logout failed: {e}", exc_info=True)
         return JSONResponse({"success": False, "error": str(e)})
 
 

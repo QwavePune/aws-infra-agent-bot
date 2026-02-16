@@ -1,7 +1,7 @@
 # Multi-stage Docker build for LangChain Agent
 
 # Stage 1: Builder
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
@@ -21,14 +21,19 @@ WORKDIR /app
 
 # Install runtime dependencies (keyring support + terraform)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     dbus \
     libdbus-1-3 \
     curl \
     gnupg \
-    software-properties-common \
-    && curl -fsSL https://apt.releases.hashicorp.com/gpg | apt-key add - \
-    && apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
-    && apt-get update && apt-get install -y terraform \
+    lsb-release \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /etc/apt/keyrings/hashicorp-archive-keyring.gpg \
+    && chmod a+r /etc/apt/keyrings/hashicorp-archive-keyring.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/hashicorp.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends terraform \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder

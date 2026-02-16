@@ -174,6 +174,7 @@ jobs:
           test -n "${{ secrets.ECS_SERVICE }}" || (echo "Missing secret: ECS_SERVICE" && exit 1)
           test -n "${{ secrets.ECS_TASK_EXECUTION_ROLE_ARN }}" || (echo "Missing secret: ECS_TASK_EXECUTION_ROLE_ARN" && exit 1)
           test -n "${{ secrets.ECS_TASK_ROLE_ARN }}" || (echo "Missing secret: ECS_TASK_ROLE_ARN" && exit 1)
+          test -n "${{ secrets.OPENAI_SECRET_ARN }}" || (echo "Missing secret: OPENAI_SECRET_ARN" && exit 1)
           test -n "${{ secrets.PERPLEXITY_SECRET_ARN }}" || (echo "Missing secret: PERPLEXITY_SECRET_ARN" && exit 1)
       - name: Ensure CloudWatch log group exists
         run: |
@@ -183,20 +184,28 @@ jobs:
           IMAGE_URI: ${{ needs.build-docker.outputs.image-uri }}
           ECS_TASK_EXECUTION_ROLE_ARN: ${{ secrets.ECS_TASK_EXECUTION_ROLE_ARN }}
           ECS_TASK_ROLE_ARN: ${{ secrets.ECS_TASK_ROLE_ARN }}
+          OPENAI_SECRET_ARN: ${{ secrets.OPENAI_SECRET_ARN }}
           PERPLEXITY_SECRET_ARN: ${{ secrets.PERPLEXITY_SECRET_ARN }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
         run: |
           jq \
             --arg image "$IMAGE_URI" \
             --arg region "$AWS_REGION" \
             --arg executionRoleArn "$ECS_TASK_EXECUTION_ROLE_ARN" \
             --arg taskRoleArn "$ECS_TASK_ROLE_ARN" \
+            --arg openaiSecretArn "$OPENAI_SECRET_ARN" \
             --arg perplexitySecretArn "$PERPLEXITY_SECRET_ARN" \
+            --arg llmProvider "$LLM_PROVIDER" \
             '
             .family = "langchain-agent" |
             .containerDefinitions[0].name = "langchain-agent" |
             .containerDefinitions[0].image = $image |
             .containerDefinitions[0].logConfiguration.options["awslogs-region"] = $region |
-            .containerDefinitions[0].secrets = [{"name":"PERPLEXITY_API_KEY","valueFrom":$perplexitySecretArn}] |
+            .containerDefinitions[0].environment = [{"name":"LLM_PROVIDER","value":$llmProvider}] |
+            .containerDefinitions[0].secrets = [
+              {"name":"OPENAI_API_KEY","valueFrom":$openaiSecretArn},
+              {"name":"PERPLEXITY_API_KEY","valueFrom":$perplexitySecretArn}
+            ] |
             .executionRoleArn = $executionRoleArn |
             .taskRoleArn = $taskRoleArn
             ' deployment/ecs-task-definition.json > ecs-task-definition.rendered.json

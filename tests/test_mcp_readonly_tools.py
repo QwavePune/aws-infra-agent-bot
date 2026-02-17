@@ -49,7 +49,7 @@ def test_list_account_inventory_summarizes_counts(server, monkeypatch):
         region = params.get("region")
         if rtype == "s3":
             return {"success": True, "count": 2, "items": []}
-        per_region = {"ec2": 3, "vpc": 1, "rds": 0, "lambda": 4}
+        per_region = {"ec2": 3, "vpc": 1, "rds": 0, "lambda": 4, "ecs": 2}
         return {"success": True, "resource_type": rtype, "region": region, "count": per_region[rtype], "items": []}
 
     monkeypatch.setattr(server, "_list_aws_resources", fake_list_aws_resources)
@@ -61,6 +61,7 @@ def test_list_account_inventory_summarizes_counts(server, monkeypatch):
     assert result["summary"]["vpc"] == 2
     assert result["summary"]["rds"] == 0
     assert result["summary"]["lambda"] == 8
+    assert result["summary"]["ecs"] == 4
     assert len(result["regional_breakdown"]) == 2
 
 
@@ -79,4 +80,3 @@ def test_list_aws_resources_s3_with_mocked_boto(server, monkeypatch):
     assert result["success"] is True
     assert result["count"] == 1
     assert result["items"][0]["name"] == "bucket-a"
-

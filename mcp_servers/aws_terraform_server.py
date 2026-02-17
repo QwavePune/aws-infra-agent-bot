@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import logging
+import uuid
+import re
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from datetime import datetime
@@ -18,6 +20,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 class AWSRBACManager:
@@ -196,12 +199,15 @@ class TerraformManager:
             
             if result.returncode != 0:
                 logger.error(f"Terraform command failed: {result.stderr}")
+
+            clean_stdout = ANSI_ESCAPE_RE.sub("", result.stdout or "")
+            clean_stderr = ANSI_ESCAPE_RE.sub("", result.stderr or "")
             
             return {
                 "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "error": result.stderr if result.returncode != 0 else None,
+                "stdout": clean_stdout,
+                "stderr": clean_stderr,
+                "error": clean_stderr if result.returncode != 0 else None,
                 "returncode": result.returncode
             }
         except subprocess.TimeoutExpired:
@@ -735,6 +741,128 @@ resource "aws_lambda_function" "test_lambda" {{
 }}
 """
 
+    @staticmethod
+    def ecs_fargate_service(
+        *,
+        region: str,
+        cluster_name: str,
+        service_name: str,
+        container_image: str,
+        execution_role_arn: str,
+        task_role_arn: str,
+        subnet_ids: List[str],
+        security_group_ids: List[str],
+        container_port: int = 8080,
+        desired_count: int = 1,
+        cpu: int = 256,
+        memory: int = 512,
+        assign_public_ip: bool = True
+    ) -> str:
+        """Generate Terraform config for ECS Fargate service on an existing VPC/network."""
+        subnets_hcl = ", ".join([f'"{s}"' for s in subnet_ids])
+        sgs_hcl = ", ".join([f'"{s}"' for s in security_group_ids])
+        assign_public_ip_hcl = "true" if assign_public_ip else "false"
+
+        return f"""
+terraform {{
+  required_providers {{
+    aws = {{
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }}
+  }}
+}}
+
+provider "aws" {{
+  region = "{region}"
+}}
+
+resource "aws_cloudwatch_log_group" "ecs_logs" {{
+  name              = "/ecs/{service_name}"
+  retention_in_days = 14
+
+  tags = {{
+    ManagedBy = "AWS-Infra-Agent-MCP"
+  }}
+}}
+
+resource "aws_ecs_cluster" "main" {{
+  name = "{cluster_name}"
+
+  setting {{
+    name  = "containerInsights"
+    value = "enabled"
+  }}
+
+  tags = {{
+    Name      = "{cluster_name}"
+    ManagedBy = "AWS-Infra-Agent-MCP"
+  }}
+}}
+
+resource "aws_ecs_task_definition" "app" {{
+  family                   = "{service_name}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "{cpu}"
+  memory                   = "{memory}"
+  execution_role_arn       = "{execution_role_arn}"
+  task_role_arn            = "{task_role_arn}"
+
+  container_definitions = jsonencode([
+    {{
+      name      = "{service_name}"
+      image     = "{container_image}"
+      essential = true
+      portMappings = [
+        {{
+          containerPort = {container_port}
+          protocol      = "tcp"
+        }}
+      ]
+      logConfiguration = {{
+        logDriver = "awslogs"
+        options = {{
+          awslogs-group         = aws_cloudwatch_log_group.ecs_logs.name
+          awslogs-region        = "{region}"
+          awslogs-stream-prefix = "ecs"
+        }}
+      }}
+    }}
+  ])
+}}
+
+resource "aws_ecs_service" "app" {{
+  name            = "{service_name}"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = {desired_count}
+  launch_type     = "FARGATE"
+
+  network_configuration {{
+    subnets          = [{subnets_hcl}]
+    security_groups  = [{sgs_hcl}]
+    assign_public_ip = {assign_public_ip_hcl}
+  }}
+
+  deployment_minimum_healthy_percent = 50
+  deployment_maximum_percent         = 200
+
+  tags = {{
+    Name      = "{service_name}"
+    ManagedBy = "AWS-Infra-Agent-MCP"
+  }}
+}}
+
+output "ecs_cluster_name" {{
+  value = aws_ecs_cluster.main.name
+}}
+
+output "ecs_service_name" {{
+  value = aws_ecs_service.app.name
+}}
+"""
+
 
 # MCP Server Tools
 class MCPAWSManagerServer:
@@ -745,6 +873,156 @@ class MCPAWSManagerServer:
         self.terraform = TerraformManager(rbac_manager=self.rbac)
         self.aws_cli = AWSCLIManager(rbac_manager=self.rbac)
         self.templates = AWSInfrastructureTemplates()
+        self.ecs_workflows: Dict[str, Dict[str, Any]] = {}
+
+    def _ecs_missing_fields(self, config: Dict[str, Any]) -> List[str]:
+        required = (
+            "region",
+            "cluster_name",
+            "service_name",
+            "container_image",
+            "execution_role_arn",
+            "task_role_arn",
+            "subnet_ids",
+            "security_group_ids",
+        )
+        missing = []
+        for key in required:
+            value = config.get(key)
+            if value is None:
+                missing.append(key)
+                continue
+            if isinstance(value, str) and not value.strip():
+                missing.append(key)
+                continue
+            if isinstance(value, list) and len(value) == 0:
+                missing.append(key)
+        return missing
+
+    def _build_config_review(self, project_name: str, config_text: str, preview_lines: int = 10) -> Dict[str, Any]:
+        """Return compact config metadata to avoid huge single-line JSON payloads."""
+        lines = config_text.splitlines()
+        head = [line.rstrip() for line in lines[:preview_lines]]
+        return {
+            "main_tf_path": str(self.terraform.workspace_dir / project_name / "main.tf"),
+            "line_count": len(lines),
+            "char_count": len(config_text),
+            "preview_head": head,
+            "preview_truncated": len(lines) > preview_lines,
+        }
+
+    def _ecs_preflight_help(self, region: str) -> List[str]:
+        """Return actionable commands for discovering valid ECS networking prerequisites."""
+        return [
+            f"aws ec2 describe-subnets --region {region} --query 'Subnets[].{{SubnetId:SubnetId,VpcId:VpcId,Az:AvailabilityZone}}' --output table",
+            f"aws ec2 describe-security-groups --region {region} --query 'SecurityGroups[].{{GroupId:GroupId,VpcId:VpcId,Name:GroupName}}' --output table",
+            "Use subnet_ids and security_group_ids from the same VPC.",
+            "Use real IAM role ARNs for execution_role_arn and task_role_arn."
+        ]
+
+    def _validate_ecs_prereqs(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate ECS workflow prerequisites before terraform plan/apply."""
+        region = config.get("region") or "us-east-1"
+        subnet_ids = list(config.get("subnet_ids") or [])
+        security_group_ids = list(config.get("security_group_ids") or [])
+        execution_role_arn = config.get("execution_role_arn")
+        task_role_arn = config.get("task_role_arn")
+
+        validation = {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "details": {
+                "region": region,
+                "subnet_ids": subnet_ids,
+                "security_group_ids": security_group_ids,
+            },
+            "remediation": self._ecs_preflight_help(region),
+        }
+
+        subnet_vpcs: List[str] = []
+        sg_vpcs: List[str] = []
+
+        # Validate subnet IDs and capture VPC mapping.
+        if subnet_ids:
+            try:
+                ec2 = boto3.client("ec2", region_name=region)
+                subnets = ec2.describe_subnets(SubnetIds=subnet_ids).get("Subnets", [])
+                found_subnet_ids = [s.get("SubnetId") for s in subnets if s.get("SubnetId")]
+                missing_subnet_ids = sorted(set(subnet_ids) - set(found_subnet_ids))
+                if missing_subnet_ids:
+                    validation["errors"].append(f"Invalid or missing subnet IDs: {missing_subnet_ids}")
+
+                subnet_vpcs = sorted({s.get("VpcId") for s in subnets if s.get("VpcId")})
+                if len(subnet_vpcs) > 1:
+                    validation["errors"].append(f"Subnets belong to multiple VPCs: {subnet_vpcs}")
+                validation["details"]["subnet_vpcs"] = subnet_vpcs
+            except ClientError as e:
+                validation["errors"].append(f"Subnet validation failed: {str(e)}")
+            except Exception as e:
+                validation["warnings"].append(f"Could not fully validate subnets: {str(e)}")
+
+        # Validate security groups and capture VPC mapping.
+        if security_group_ids:
+            try:
+                ec2 = boto3.client("ec2", region_name=region)
+                sgs = ec2.describe_security_groups(GroupIds=security_group_ids).get("SecurityGroups", [])
+                found_sg_ids = [sg.get("GroupId") for sg in sgs if sg.get("GroupId")]
+                missing_sg_ids = sorted(set(security_group_ids) - set(found_sg_ids))
+                if missing_sg_ids:
+                    validation["errors"].append(f"Invalid or missing security group IDs: {missing_sg_ids}")
+
+                sg_vpcs = sorted({sg.get("VpcId") for sg in sgs if sg.get("VpcId")})
+                if len(sg_vpcs) > 1:
+                    validation["errors"].append(f"Security groups belong to multiple VPCs: {sg_vpcs}")
+                validation["details"]["security_group_vpcs"] = sg_vpcs
+            except ClientError as e:
+                validation["errors"].append(f"Security group validation failed: {str(e)}")
+            except Exception as e:
+                validation["warnings"].append(f"Could not fully validate security groups: {str(e)}")
+
+        # Cross-check subnet and security group VPCs.
+        if len(subnet_vpcs) == 1 and len(sg_vpcs) == 1 and subnet_vpcs[0] != sg_vpcs[0]:
+            validation["errors"].append(
+                f"VPC mismatch: subnets are in {subnet_vpcs[0]} but security groups are in {sg_vpcs[0]}"
+            )
+
+        # Validate role ARNs by resolving role names.
+        iam = None
+        try:
+            iam = boto3.client("iam")
+        except Exception as e:
+            validation["warnings"].append(f"Could not initialize IAM client for role validation: {str(e)}")
+
+        def _check_role(role_arn: Optional[str], label: str):
+            if not role_arn:
+                return
+            role_name = role_arn.split("role/")[-1].split("/")[-1]
+            if not role_name:
+                validation["errors"].append(f"{label} is not a valid IAM role ARN: {role_arn}")
+                return
+            if iam is None:
+                return
+            try:
+                iam.get_role(RoleName=role_name)
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code in {"NoSuchEntity", "NoSuchEntityException"}:
+                    validation["errors"].append(f"{label} does not exist: {role_arn}")
+                elif code in {"AccessDenied", "AccessDeniedException"}:
+                    validation["warnings"].append(
+                        f"Access denied validating {label}; ensure role exists and is assumable: {role_arn}"
+                    )
+                else:
+                    validation["warnings"].append(f"Could not validate {label}: {str(e)}")
+            except Exception as e:
+                validation["warnings"].append(f"Could not validate {label}: {str(e)}")
+
+        _check_role(execution_role_arn, "execution_role_arn")
+        _check_role(task_role_arn, "task_role_arn")
+
+        validation["valid"] = len(validation["errors"]) == 0
+        return validation
         
     def initialize(self) -> Dict[str, Any]:
         """Initialize the MCP server"""
@@ -789,7 +1067,7 @@ class MCPAWSManagerServer:
                     "properties": {
                         "resource_type": {
                             "type": "string",
-                            "enum": ["ec2", "vpc", "rds", "lambda", "s3"],
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs"],
                             "description": "Resource type to list (required)."
                         },
                         "region": {
@@ -808,7 +1086,7 @@ class MCPAWSManagerServer:
                     "properties": {
                         "resource_type": {
                             "type": "string",
-                            "enum": ["ec2", "vpc", "rds", "lambda", "s3"],
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs"],
                             "description": "Resource type (required)."
                         },
                         "resource_id": {
@@ -821,6 +1099,86 @@ class MCPAWSManagerServer:
                         }
                     },
                     "required": ["resource_type", "resource_id"]
+                }
+            },
+            {
+                "name": "start_ecs_deployment_workflow",
+                "description": "Start a guided ECS Fargate deployment workflow and return missing inputs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "region": {"type": "string", "description": "AWS region (for example ap-south-1)."},
+                        "cluster_name": {"type": "string", "description": "ECS cluster name."},
+                        "service_name": {"type": "string", "description": "ECS service name / task family name."},
+                        "container_image": {"type": "string", "description": "Container image URI (ECR or public)."},
+                        "execution_role_arn": {"type": "string", "description": "ECS task execution role ARN."},
+                        "task_role_arn": {"type": "string", "description": "ECS task role ARN."},
+                        "subnet_ids": {"type": "array", "items": {"type": "string"}, "description": "Subnets for awsvpc network mode."},
+                        "security_group_ids": {"type": "array", "items": {"type": "string"}, "description": "Security groups for the service ENIs."},
+                        "desired_count": {"type": "integer", "description": "Desired task count (default 1)."},
+                        "container_port": {"type": "integer", "description": "Container port (default 8080)."},
+                        "cpu": {"type": "integer", "description": "Task CPU units (default 256)."},
+                        "memory": {"type": "integer", "description": "Task memory MB (default 512)."},
+                        "assign_public_ip": {"type": "boolean", "description": "Assign public IP in awsvpc mode (default true)."}
+                    }
+                }
+            },
+            {
+                "name": "update_ecs_deployment_workflow",
+                "description": "Update an in-progress ECS deployment workflow with new inputs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "Workflow identifier returned by start_ecs_deployment_workflow."},
+                        "region": {"type": "string"},
+                        "cluster_name": {"type": "string"},
+                        "service_name": {"type": "string"},
+                        "container_image": {"type": "string"},
+                        "execution_role_arn": {"type": "string"},
+                        "task_role_arn": {"type": "string"},
+                        "subnet_ids": {"type": "array", "items": {"type": "string"}},
+                        "security_group_ids": {"type": "array", "items": {"type": "string"}},
+                        "desired_count": {"type": "integer"},
+                        "container_port": {"type": "integer"},
+                        "cpu": {"type": "integer"},
+                        "memory": {"type": "integer"},
+                        "assign_public_ip": {"type": "boolean"}
+                    },
+                    "required": ["workflow_id"]
+                }
+            },
+            {
+                "name": "review_ecs_deployment_workflow",
+                "description": "Review the ECS workflow config, show readiness/missing fields, and next action.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "Workflow identifier."}
+                    },
+                    "required": ["workflow_id"]
+                }
+            },
+            {
+                "name": "create_ecs_service",
+                "description": "Create ECS Fargate Terraform project from workflow_id or direct parameters.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "Optional workflow identifier to source config from."},
+                        "region": {"type": "string"},
+                        "cluster_name": {"type": "string"},
+                        "service_name": {"type": "string"},
+                        "container_image": {"type": "string"},
+                        "execution_role_arn": {"type": "string"},
+                        "task_role_arn": {"type": "string"},
+                        "subnet_ids": {"type": "array", "items": {"type": "string"}},
+                        "security_group_ids": {"type": "array", "items": {"type": "string"}},
+                        "desired_count": {"type": "integer"},
+                        "container_port": {"type": "integer"},
+                        "cpu": {"type": "integer"},
+                        "memory": {"type": "integer"},
+                        "assign_public_ip": {"type": "boolean"}
+                    }
                 }
             },
             {
@@ -1788,6 +2146,9 @@ class MCPAWSManagerServer:
         # 1. Try exact match
         if (self.terraform.workspace_dir / project_name).exists():
             return project_name
+            
+        # 2. Try common prefixes
+        prefixes = ["s3_", "ec2_", "vpc_", "rds_", "lambda_", "ecs_"]
         
         # 2. Check if it's an AWS resource ID or ARN (starts with common prefixes or 'arn:')
         if (project_name.startswith('i-') or 
@@ -1843,6 +2204,10 @@ class MCPAWSManagerServer:
             "list_account_inventory": self._list_account_inventory,
             "list_aws_resources": self._list_aws_resources,
             "describe_resource": self._describe_resource,
+            "start_ecs_deployment_workflow": self._start_ecs_deployment_workflow,
+            "update_ecs_deployment_workflow": self._update_ecs_deployment_workflow,
+            "review_ecs_deployment_workflow": self._review_ecs_deployment_workflow,
+            "create_ecs_service": self._create_ecs_service,
             "create_ec2_instance": self._create_ec2_instance,
             "create_s3_bucket": self._create_s3_bucket,
             "create_vpc": self._create_vpc,
@@ -1921,6 +2286,22 @@ class MCPAWSManagerServer:
                 } for f in lam.list_functions().get("Functions", [])]
                 return {"success": True, "resource_type": "lambda", "region": region, "count": len(funcs), "items": funcs}
 
+            if resource_type == "ecs":
+                ecs = boto3.client("ecs", region_name=region)
+                cluster_arns = ecs.list_clusters().get("clusterArns", [])
+                clusters = []
+                if cluster_arns:
+                    described = ecs.describe_clusters(clusters=cluster_arns).get("clusters", [])
+                    for c in described:
+                        clusters.append({
+                            "cluster_name": c.get("clusterName"),
+                            "cluster_arn": c.get("clusterArn"),
+                            "status": c.get("status"),
+                            "running_tasks_count": c.get("runningTasksCount"),
+                            "active_services_count": c.get("activeServicesCount"),
+                        })
+                return {"success": True, "resource_type": "ecs", "region": region, "count": len(clusters), "items": clusters}
+
             return {"success": False, "error": f"Unsupported resource_type '{resource_type}'"}
         except Exception as e:
             return {"success": False, "error": f"Failed to list {resource_type} resources: {str(e)}"}
@@ -1971,6 +2352,33 @@ class MCPAWSManagerServer:
                 func = lam.get_function(FunctionName=resource_id)
                 return {"success": True, "resource_type": "lambda", "region": region, "resource_id": resource_id, "details": func.get("Configuration", {})}
 
+            if resource_type == "ecs":
+                ecs = boto3.client("ecs", region_name=region)
+                # resource_id can be cluster name/arn or cluster/service tuple: cluster_name/service_name
+                if "/" in resource_id and not resource_id.startswith("arn:"):
+                    cluster_name, service_name = resource_id.split("/", 1)
+                    service = ecs.describe_services(cluster=cluster_name, services=[service_name]).get("services", [])
+                    if not service:
+                        return {"success": False, "error": f"ECS service '{resource_id}' not found in {region}"}
+                    return {
+                        "success": True,
+                        "resource_type": "ecs",
+                        "region": region,
+                        "resource_id": resource_id,
+                        "details": service[0]
+                    }
+
+                cluster = ecs.describe_clusters(clusters=[resource_id]).get("clusters", [])
+                if not cluster:
+                    return {"success": False, "error": f"ECS cluster '{resource_id}' not found in {region}"}
+                return {
+                    "success": True,
+                    "resource_type": "ecs",
+                    "region": region,
+                    "resource_id": resource_id,
+                    "details": cluster[0]
+                }
+
             return {"success": False, "error": f"Unsupported resource_type '{resource_type}'"}
         except Exception as e:
             return {"success": False, "error": f"Failed to describe {resource_type} resource '{resource_id}': {str(e)}"}
@@ -1984,7 +2392,7 @@ class MCPAWSManagerServer:
         # Keep bounded for latency/safety in LLM loops.
         regions = list(regions)[:20]
 
-        summary = {"ec2": 0, "vpc": 0, "rds": 0, "lambda": 0, "s3": 0}
+        summary = {"ec2": 0, "vpc": 0, "rds": 0, "lambda": 0, "ecs": 0, "s3": 0}
         regional_breakdown = []
 
         # Global S3 count
@@ -1993,8 +2401,8 @@ class MCPAWSManagerServer:
             summary["s3"] = s3_result.get("count", 0)
 
         for region in regions:
-            region_counts = {"region": region, "ec2": 0, "vpc": 0, "rds": 0, "lambda": 0}
-            for rtype in ("ec2", "vpc", "rds", "lambda"):
+            region_counts = {"region": region, "ec2": 0, "vpc": 0, "rds": 0, "lambda": 0, "ecs": 0}
+            for rtype in ("ec2", "vpc", "rds", "lambda", "ecs"):
                 result = self._list_aws_resources({"resource_type": rtype, "region": region})
                 if result.get("success"):
                     count = result.get("count", 0)
@@ -2007,6 +2415,210 @@ class MCPAWSManagerServer:
             "summary": summary,
             "regions_scanned": regions,
             "regional_breakdown": regional_breakdown
+        }
+
+    def _start_ecs_deployment_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Start a multi-turn ECS deployment workflow."""
+        workflow_id = f"ecs-{uuid.uuid4().hex[:12]}"
+        config = {
+            "region": params.get("region") or os.getenv("AWS_REGION") or "us-east-1",
+            "cluster_name": params.get("cluster_name"),
+            "service_name": params.get("service_name"),
+            "container_image": params.get("container_image"),
+            "execution_role_arn": params.get("execution_role_arn"),
+            "task_role_arn": params.get("task_role_arn"),
+            "subnet_ids": params.get("subnet_ids") or [],
+            "security_group_ids": params.get("security_group_ids") or [],
+            "desired_count": params.get("desired_count", 1),
+            "container_port": params.get("container_port", 8080),
+            "cpu": params.get("cpu", 256),
+            "memory": params.get("memory", 512),
+            "assign_public_ip": params.get("assign_public_ip", True),
+        }
+        missing = self._ecs_missing_fields(config)
+        preflight = self._validate_ecs_prereqs(config) if len(missing) == 0 else None
+        self.ecs_workflows[workflow_id] = {"config": config}
+
+        return {
+            "success": True,
+            "workflow_id": workflow_id,
+            "workflow_type": "ecs_fargate",
+            "config": config,
+            "missing_fields": missing,
+            "preflight": preflight,
+            "ready_to_create": len(missing) == 0 and bool(preflight and preflight.get("valid")),
+            "next_action": "call create_ecs_service when ready" if not missing else "call update_ecs_deployment_workflow with missing fields",
+        }
+
+    def _update_ecs_deployment_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Update ECS workflow configuration with new values."""
+        workflow_id = params.get("workflow_id")
+        if not workflow_id:
+            return {"success": False, "error": "workflow_id is required"}
+        workflow = self.ecs_workflows.get(workflow_id)
+        if not workflow:
+            return {"success": False, "error": f"ECS workflow '{workflow_id}' not found"}
+
+        config = workflow["config"]
+        for key in (
+            "region",
+            "cluster_name",
+            "service_name",
+            "container_image",
+            "execution_role_arn",
+            "task_role_arn",
+            "subnet_ids",
+            "security_group_ids",
+            "desired_count",
+            "container_port",
+            "cpu",
+            "memory",
+            "assign_public_ip",
+        ):
+            if key in params and params.get(key) is not None:
+                config[key] = params.get(key)
+
+        missing = self._ecs_missing_fields(config)
+        preflight = self._validate_ecs_prereqs(config) if len(missing) == 0 else None
+        return {
+            "success": True,
+            "workflow_id": workflow_id,
+            "config": config,
+            "missing_fields": missing,
+            "preflight": preflight,
+            "ready_to_create": len(missing) == 0 and bool(preflight and preflight.get("valid")),
+            "next_action": "call create_ecs_service" if not missing else "call update_ecs_deployment_workflow with remaining fields",
+        }
+
+    def _review_ecs_deployment_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Review current ECS workflow and provide deployment guidance."""
+        workflow_id = params.get("workflow_id")
+        if not workflow_id:
+            return {"success": False, "error": "workflow_id is required"}
+        workflow = self.ecs_workflows.get(workflow_id)
+        if not workflow:
+            return {"success": False, "error": f"ECS workflow '{workflow_id}' not found"}
+
+        config = workflow["config"]
+        missing = self._ecs_missing_fields(config)
+        preflight = self._validate_ecs_prereqs(config) if len(missing) == 0 else None
+        project_name = f"ecs_{(config.get('service_name') or 'service')}_{config.get('region')}"
+
+        return {
+            "success": True,
+            "workflow_id": workflow_id,
+            "ready_to_create": len(missing) == 0 and bool(preflight and preflight.get("valid")),
+            "missing_fields": missing,
+            "preflight": preflight,
+            "project_name": project_name,
+            "plan": {
+                "region": config.get("region"),
+                "cluster_name": config.get("cluster_name"),
+                "service_name": config.get("service_name"),
+                "container_image": config.get("container_image"),
+                "desired_count": config.get("desired_count"),
+                "cpu": config.get("cpu"),
+                "memory": config.get("memory"),
+                "container_port": config.get("container_port"),
+                "subnet_ids": config.get("subnet_ids"),
+                "security_group_ids": config.get("security_group_ids"),
+            },
+            "next_action": "call create_ecs_service and then terraform_plan/terraform_apply" if not missing else "fill missing_fields using update_ecs_deployment_workflow",
+            "safety_notes": [
+                "This flow assumes existing VPC subnets and security groups.",
+                "Review IAM role ARNs before apply.",
+                "Fargate costs scale with desired_count, CPU, and memory."
+            ]
+        }
+
+    def _create_ecs_service(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create ECS Fargate Terraform project from workflow or direct parameters."""
+        if not self.rbac.check_permission("ecs:CreateCluster"):
+            return {"success": False, "error": "User lacks ecs:CreateCluster permission"}
+        if not self.rbac.check_permission("ecs:RegisterTaskDefinition"):
+            return {"success": False, "error": "User lacks ecs:RegisterTaskDefinition permission"}
+        if not self.rbac.check_permission("ecs:CreateService"):
+            return {"success": False, "error": "User lacks ecs:CreateService permission"}
+
+        workflow_id = params.get("workflow_id")
+        if workflow_id:
+            workflow = self.ecs_workflows.get(workflow_id)
+            if not workflow:
+                return {"success": False, "error": f"ECS workflow '{workflow_id}' not found"}
+            config = dict(workflow["config"])
+        else:
+            config = {
+                "region": params.get("region") or os.getenv("AWS_REGION") or "us-east-1",
+                "cluster_name": params.get("cluster_name"),
+                "service_name": params.get("service_name"),
+                "container_image": params.get("container_image"),
+                "execution_role_arn": params.get("execution_role_arn"),
+                "task_role_arn": params.get("task_role_arn"),
+                "subnet_ids": params.get("subnet_ids") or [],
+                "security_group_ids": params.get("security_group_ids") or [],
+                "desired_count": params.get("desired_count", 1),
+                "container_port": params.get("container_port", 8080),
+                "cpu": params.get("cpu", 256),
+                "memory": params.get("memory", 512),
+                "assign_public_ip": params.get("assign_public_ip", True),
+            }
+
+        missing = self._ecs_missing_fields(config)
+        if missing:
+            return {
+                "success": False,
+                "error": "Missing required ECS configuration fields",
+                "missing_fields": missing
+            }
+
+        preflight = self._validate_ecs_prereqs(config)
+        if not preflight.get("valid"):
+            return {
+                "success": False,
+                "error": "ECS preflight validation failed. Fix invalid IDs/roles and retry create_ecs_service.",
+                "preflight": preflight
+            }
+
+        project_name = f"ecs_{config['service_name']}_{config['region']}"
+        project_path = self.terraform.workspace_dir / project_name
+        project_path.mkdir(parents=True, exist_ok=True)
+
+        tf_config = self.templates.ecs_fargate_service(
+            region=config["region"],
+            cluster_name=config["cluster_name"],
+            service_name=config["service_name"],
+            container_image=config["container_image"],
+            execution_role_arn=config["execution_role_arn"],
+            task_role_arn=config["task_role_arn"],
+            subnet_ids=config["subnet_ids"],
+            security_group_ids=config["security_group_ids"],
+            container_port=int(config["container_port"]),
+            desired_count=int(config["desired_count"]),
+            cpu=int(config["cpu"]),
+            memory=int(config["memory"]),
+            assign_public_ip=bool(config["assign_public_ip"]),
+        )
+        (project_path / "main.tf").write_text(tf_config)
+
+        init_result = self.terraform.init(project_name)
+        if not init_result.get("success"):
+            return init_result
+
+        return {
+            "success": True,
+            "project_name": project_name,
+            "workflow_id": workflow_id,
+            "deployment_status": "initialized_not_applied",
+            "preflight": preflight,
+            "next_required_tools": [
+                {"tool": "terraform_plan", "parameters": {"project_name": project_name}},
+                {"tool": "terraform_apply", "parameters": {"project_name": project_name}}
+            ],
+            "message": (
+                f"ECS service project created. Run terraform_plan with project_name='{project_name}', "
+                f"then terraform_apply to deploy."
+            ),
+            "config_review": self._build_config_review(project_name, tf_config),
         }
 
     def _create_rds_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2116,7 +2728,7 @@ class MCPAWSManagerServer:
             "success": True,
             "project_name": project_name,
             "message": f"EC2 instance project created{sg_message}. Run terraform_plan with project_name='{project_name}' to continue.",
-            "config_preview": config[:500] + "..."
+            "config_review": self._build_config_review(project_name, config)
         }
     
     def _create_s3_bucket(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2153,7 +2765,7 @@ class MCPAWSManagerServer:
             "success": True,
             "project_name": project_name,
             "message": f"S3 bucket project created. Run terraform_plan with project_name='{project_name}' to continue.",
-            "config_preview": config[:500] + "..."
+            "config_review": self._build_config_review(project_name, config)
         }
     
     def _create_vpc(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2186,7 +2798,7 @@ class MCPAWSManagerServer:
             "success": True,
             "project_name": project_name,
             "message": f"VPC project created. Run terraform_plan with project_name='{project_name}' to continue.",
-            "config_preview": config[:500] + "..."
+            "config_review": self._build_config_review(project_name, config)
         }
     
     def _terraform_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:

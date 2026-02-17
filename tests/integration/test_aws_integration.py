@@ -4,6 +4,7 @@ Integration tests for LangChain agent with AWS services
 import pytest
 import os
 from unittest.mock import patch, MagicMock
+from core.llm_config import get_api_key
 
 
 class TestAgentAWSIntegration:
@@ -17,14 +18,18 @@ class TestAgentAWSIntegration:
         # In CI/CD, OIDC will set temporary credentials
         assert has_aws_key or True  # Skip if not in AWS environment
     
-    @pytest.mark.skipif(
-        not os.getenv('PERPLEXITY_API_KEY'),
-        reason="Perplexity API key not configured"
-    )
     def test_agent_initialization_with_real_credentials(self):
         """Test agent initializes with real credentials"""
+        try:
+            api_key = get_api_key("perplexity")
+        except Exception:
+            api_key = None
+
+        if not api_key:
+            pytest.skip("Perplexity API key not configured in supported sources (env/keyring/AWS/Azure)")
+
         # This would only run if actual API keys are provided
-        from llm_config import initialize_llm
+        from core.llm_config import initialize_llm
         
         try:
             llm = initialize_llm('perplexity', temperature=0)

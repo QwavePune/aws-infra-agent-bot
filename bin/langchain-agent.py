@@ -15,6 +15,7 @@ if APP_ROOT not in sys.path:
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import select_llm_interactive, select_credential_source_interactive, initialize_llm
+from core.intent_policy import detect_read_only_intent, is_mutating_tool
 
 # Import MCP server
 try:
@@ -117,11 +118,14 @@ system_prompt = (
     "DO NOT explain what you are going to do. DO NOT ask for permission. DO NOT ask for tool outputs. "
     "THE SYSTEM AUTOMATICALLY EXECUTES YOUR TOOL CALLS AND PROVIDES THE DATA. "
     "1. For any AWS request, first CALL 'get_user_permissions' to verify identity. "
-    "2. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
-    "3. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
-    "4. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
-    "5. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
-    "6. Only provide a text response AFTER all tools have finished and the resource is created."
+    "2. For listing/discovering resources: CALL 'list_account_inventory' for a complete summary, or 'list_aws_resources' to list specific resource types. "
+    "3. For details about a specific resource: CALL 'describe_resource' with the resource ID or ARN. "
+    "4. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
+    "5. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+    "6. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
+    "7. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
+    "8. For read-only user intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools. "
+    "9. Only provide a text response AFTER all relevant tools have finished."
 )
 
 conversation_history = [SystemMessage(content=system_prompt)]
@@ -148,6 +152,8 @@ while True:
             
         conversation_history.append(HumanMessage(content=user_query))
         print("\n🔄 Processing...")
+
+        read_only_intent = detect_read_only_intent(user_query)
         
         # Tool Calling Loop (matches agui_server logic)
         max_iterations = 5
@@ -179,6 +185,17 @@ while True:
                     tool_call_id = tool_call.get("id", "legacy_call")
                     
                     print(f"  👉 Executing {tool_name}...")
+
+                    if read_only_intent and is_mutating_tool(tool_name):
+                        print(f"  ⛔ Blocked {tool_name}: read-only request")
+                        conversation_history.append(ToolMessage(
+                            content=json.dumps({
+                                "success": False,
+                                "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource."
+                            }),
+                            tool_call_id=tool_call_id
+                        ))
+                        continue
                     
                     if MCP_AVAILABLE and aws_mcp:
                         try:

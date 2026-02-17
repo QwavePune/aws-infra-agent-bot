@@ -37,6 +37,7 @@ if APP_ROOT not in sys.path:
 # Import LLM configuration
 try:
     from core.llm_config import initialize_llm, select_llm_interactive
+    from core.intent_policy import detect_read_only_intent, is_mutating_tool
 except ImportError:
     logger.error("Failed to import core.llm_config")
     raise
@@ -99,7 +100,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "You are a strict AWS Infrastructure Provisioning Agent. "
             "You MUST use tools for any AWS operations. "
             f"Deployment Integrity: {'REAL_MODE' if is_real_deploy else 'DRY_RUN_MODE'}. "
-            "If in 'DRY_RUN_MODE', inform the user that infrastructure will not be actually deployed."
+            "If in 'DRY_RUN_MODE', inform the user that infrastructure will not be actually deployed. "
+            "For read-only intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools."
         )
         
         messages = [HumanMessage(content=system_prompt if not conversation_history else "")]
@@ -112,6 +114,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     messages.append(AIMessage(content=msg.get('content')))
         
         messages.append(HumanMessage(content=query))
+        read_only_intent = detect_read_only_intent(query)
         
         # Tool execution loop
         max_iterations = 5
@@ -128,9 +131,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     tool_call_id = tool_call["id"]
+                    tool_is_mutating = is_mutating_tool(tool_name)
                     
                     # Logic to block actual apply if not real deploy
-                    if tool_name == "terraform_apply" and not is_real_deploy:
+                    if read_only_intent and tool_is_mutating:
+                        result = {
+                            "success": False,
+                            "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource."
+                        }
+                    elif tool_name == "terraform_apply" and not is_real_deploy:
                         result = {"success": False, "error": "DRY_RUN_MODE: Actual deployment blocked. Please set DEPLOY_REAL_INFRA=true to proceed."}
                     elif MCP_AVAILABLE and aws_mcp:
                         result = aws_mcp.execute_tool(tool_name, tool_args)

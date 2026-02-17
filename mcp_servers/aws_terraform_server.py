@@ -768,6 +768,62 @@ class MCPAWSManagerServer:
         """List available MCP tools"""
         return [
             {
+                "name": "list_account_inventory",
+                "description": "Read-only. Summarize AWS resources in the account across regions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "regions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of AWS regions. If omitted, uses allowed regions."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "list_aws_resources",
+                "description": "Read-only. List resources by type in a specific region.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource_type": {
+                            "type": "string",
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3"],
+                            "description": "Resource type to list (required)."
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region for regional services. Ignored for S3."
+                        }
+                    },
+                    "required": ["resource_type"]
+                }
+            },
+            {
+                "name": "describe_resource",
+                "description": "Read-only. Return details for a specific resource.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource_type": {
+                            "type": "string",
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3"],
+                            "description": "Resource type (required)."
+                        },
+                        "resource_id": {
+                            "type": "string",
+                            "description": "Resource identifier (instance id, vpc id, DB identifier, function name, bucket name)."
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region for regional services. Ignored for S3."
+                        }
+                    },
+                    "required": ["resource_type", "resource_id"]
+                }
+            },
+            {
                 "name": "create_ec2_instance",
                 "description": "Create an EC2 instance using Terraform or AWS CLI",
                 "parameters": {
@@ -1784,6 +1840,9 @@ class MCPAWSManagerServer:
         
         # Route to appropriate handler
         handlers = {
+            "list_account_inventory": self._list_account_inventory,
+            "list_aws_resources": self._list_aws_resources,
+            "describe_resource": self._describe_resource,
             "create_ec2_instance": self._create_ec2_instance,
             "create_s3_bucket": self._create_s3_bucket,
             "create_vpc": self._create_vpc,
@@ -1807,6 +1866,148 @@ class MCPAWSManagerServer:
             return {"success": False, "error": f"Unknown tool: {tool_name}"}
         
         return handler(parameters)
+
+    def _list_aws_resources(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only resource listing by type."""
+        resource_type = (params.get("resource_type") or "").lower()
+        region = params.get("region") or os.getenv("AWS_REGION") or "us-east-1"
+
+        try:
+            if resource_type == "s3":
+                s3 = boto3.client("s3")
+                buckets = [{"name": b.get("Name"), "created": str(b.get("CreationDate"))} for b in s3.list_buckets().get("Buckets", [])]
+                return {"success": True, "resource_type": "s3", "count": len(buckets), "items": buckets}
+
+            if resource_type == "ec2":
+                ec2 = boto3.client("ec2", region_name=region)
+                reservations = ec2.describe_instances().get("Reservations", [])
+                instances = []
+                for r in reservations:
+                    for i in r.get("Instances", []):
+                        instances.append({
+                            "instance_id": i.get("InstanceId"),
+                            "state": i.get("State", {}).get("Name"),
+                            "instance_type": i.get("InstanceType"),
+                            "private_ip": i.get("PrivateIpAddress"),
+                            "public_ip": i.get("PublicIpAddress"),
+                        })
+                return {"success": True, "resource_type": "ec2", "region": region, "count": len(instances), "items": instances}
+
+            if resource_type == "vpc":
+                ec2 = boto3.client("ec2", region_name=region)
+                vpcs = [{
+                    "vpc_id": v.get("VpcId"),
+                    "cidr": v.get("CidrBlock"),
+                    "state": v.get("State")
+                } for v in ec2.describe_vpcs().get("Vpcs", [])]
+                return {"success": True, "resource_type": "vpc", "region": region, "count": len(vpcs), "items": vpcs}
+
+            if resource_type == "rds":
+                rds = boto3.client("rds", region_name=region)
+                dbs = [{
+                    "db_identifier": d.get("DBInstanceIdentifier"),
+                    "engine": d.get("Engine"),
+                    "status": d.get("DBInstanceStatus"),
+                    "class": d.get("DBInstanceClass")
+                } for d in rds.describe_db_instances().get("DBInstances", [])]
+                return {"success": True, "resource_type": "rds", "region": region, "count": len(dbs), "items": dbs}
+
+            if resource_type == "lambda":
+                lam = boto3.client("lambda", region_name=region)
+                funcs = [{
+                    "function_name": f.get("FunctionName"),
+                    "runtime": f.get("Runtime"),
+                    "last_modified": f.get("LastModified")
+                } for f in lam.list_functions().get("Functions", [])]
+                return {"success": True, "resource_type": "lambda", "region": region, "count": len(funcs), "items": funcs}
+
+            return {"success": False, "error": f"Unsupported resource_type '{resource_type}'"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to list {resource_type} resources: {str(e)}"}
+
+    def _describe_resource(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only resource details."""
+        resource_type = (params.get("resource_type") or "").lower()
+        resource_id = params.get("resource_id")
+        region = params.get("region") or os.getenv("AWS_REGION") or "us-east-1"
+
+        if not resource_id:
+            return {"success": False, "error": "resource_id is required"}
+
+        try:
+            if resource_type == "s3":
+                s3 = boto3.client("s3")
+                location = s3.get_bucket_location(Bucket=resource_id).get("LocationConstraint") or "us-east-1"
+                return {
+                    "success": True,
+                    "resource_type": "s3",
+                    "resource_id": resource_id,
+                    "details": {"bucket_name": resource_id, "region": location}
+                }
+
+            if resource_type == "ec2":
+                ec2 = boto3.client("ec2", region_name=region)
+                res = ec2.describe_instances(InstanceIds=[resource_id]).get("Reservations", [])
+                if not res or not res[0].get("Instances"):
+                    return {"success": False, "error": f"EC2 instance '{resource_id}' not found in {region}"}
+                return {"success": True, "resource_type": "ec2", "region": region, "resource_id": resource_id, "details": res[0]["Instances"][0]}
+
+            if resource_type == "vpc":
+                ec2 = boto3.client("ec2", region_name=region)
+                vpcs = ec2.describe_vpcs(VpcIds=[resource_id]).get("Vpcs", [])
+                if not vpcs:
+                    return {"success": False, "error": f"VPC '{resource_id}' not found in {region}"}
+                return {"success": True, "resource_type": "vpc", "region": region, "resource_id": resource_id, "details": vpcs[0]}
+
+            if resource_type == "rds":
+                rds = boto3.client("rds", region_name=region)
+                dbs = rds.describe_db_instances(DBInstanceIdentifier=resource_id).get("DBInstances", [])
+                if not dbs:
+                    return {"success": False, "error": f"RDS instance '{resource_id}' not found in {region}"}
+                return {"success": True, "resource_type": "rds", "region": region, "resource_id": resource_id, "details": dbs[0]}
+
+            if resource_type == "lambda":
+                lam = boto3.client("lambda", region_name=region)
+                func = lam.get_function(FunctionName=resource_id)
+                return {"success": True, "resource_type": "lambda", "region": region, "resource_id": resource_id, "details": func.get("Configuration", {})}
+
+            return {"success": False, "error": f"Unsupported resource_type '{resource_type}'"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to describe {resource_type} resource '{resource_id}': {str(e)}"}
+
+    def _list_account_inventory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only account inventory summary across regions."""
+        regions = params.get("regions")
+        if not regions:
+            regions = self.rbac.get_allowed_regions()
+
+        # Keep bounded for latency/safety in LLM loops.
+        regions = list(regions)[:20]
+
+        summary = {"ec2": 0, "vpc": 0, "rds": 0, "lambda": 0, "s3": 0}
+        regional_breakdown = []
+
+        # Global S3 count
+        s3_result = self._list_aws_resources({"resource_type": "s3"})
+        if s3_result.get("success"):
+            summary["s3"] = s3_result.get("count", 0)
+
+        for region in regions:
+            region_counts = {"region": region, "ec2": 0, "vpc": 0, "rds": 0, "lambda": 0}
+            for rtype in ("ec2", "vpc", "rds", "lambda"):
+                result = self._list_aws_resources({"resource_type": rtype, "region": region})
+                if result.get("success"):
+                    count = result.get("count", 0)
+                    summary[rtype] += count
+                    region_counts[rtype] = count
+            regional_breakdown.append(region_counts)
+
+        return {
+            "success": True,
+            "summary": summary,
+            "regions_scanned": regions,
+            "regional_breakdown": regional_breakdown
+        }
 
     def _create_rds_instance(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Create RDS instance using Terraform or CLI"""

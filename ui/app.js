@@ -8,12 +8,16 @@ const mcpSelect = document.getElementById("mcpSelect");
 const threadIdLabel = document.getElementById("threadId");
 const providerLabel = document.getElementById("providerLabel");
 const latencyLabel = document.getElementById("latencyLabel");
+const promptChips = document.querySelectorAll(".prompt-chip");
+const capabilitiesContent = document.getElementById("capabilitiesContent");
 
 let threadId = crypto.randomUUID();
 let currentAssistantBubble = null;
 let pendingStart = null;
 
-threadIdLabel.textContent = threadId;
+if (threadIdLabel) {
+  threadIdLabel.textContent = threadId;
+}
 
 const MODEL_SEPARATOR = "::";
 
@@ -129,6 +133,144 @@ const updateProviderLabel = () => {
 
 modelSelect.addEventListener("change", updateProviderLabel);
 
+const categorizeTools = (tools) => {
+  const dedupedMap = new Map();
+  (tools || []).forEach((tool) => {
+    const name = (tool.name || "").trim();
+    if (!name) return;
+    const existing = dedupedMap.get(name);
+    if (!existing) {
+      dedupedMap.set(name, tool);
+      return;
+    }
+    const currentDesc = String(tool.description || "");
+    const existingDesc = String(existing.description || "");
+    // Prefer the richer description when duplicate tool names appear.
+    if (currentDesc.length > existingDesc.length) {
+      dedupedMap.set(name, tool);
+    }
+  });
+
+  const groups = {
+    "Discovery & Read-Only": [],
+    "AWS Infra Automation": [],
+    "Workflow Orchestration": [],
+    "Terraform Lifecycle (Generic)": [],
+    "Identity & Access": [],
+    "Other Tools": [],
+  };
+
+  [...dedupedMap.values()].forEach((tool) => {
+    const name = (tool.name || "").trim();
+    if (name === "list_account_inventory" || name === "list_aws_resources" || name === "describe_resource") {
+      groups["Discovery & Read-Only"].push(tool);
+    } else if (name.startsWith("create_")) {
+      groups["AWS Infra Automation"].push(tool);
+    } else if (name.startsWith("start_") || name.startsWith("update_") || name.startsWith("review_")) {
+      groups["Workflow Orchestration"].push(tool);
+    } else if (name.startsWith("terraform_") || name === "get_infrastructure_state") {
+      groups["Terraform Lifecycle (Generic)"].push(tool);
+    } else if (name === "get_user_permissions") {
+      groups["Identity & Access"].push(tool);
+    } else {
+      groups["Other Tools"].push(tool);
+    }
+  });
+
+  return groups;
+};
+
+const renderCapabilities = (tools) => {
+  if (!capabilitiesContent) return;
+  const groups = categorizeTools(tools || []);
+  const serviceSummary = [
+    {
+      title: "Discovery & Inventory",
+      description: "Account-wide listing and detailed resource lookups across regions.",
+      active: groups["Discovery & Read-Only"].length > 0,
+      hint: "Ask: List all resources in my account",
+    },
+    {
+      title: "Compute",
+      description: "Provision and manage EC2, Lambda, and ECS deployment flows.",
+      active: groups["AWS Infra Automation"].some((t) => ["create_ec2_instance", "create_lambda_function", "create_ecs_service"].includes(t.name)),
+      hint: "Ask: Show ECS capabilities",
+    },
+    {
+      title: "Storage",
+      description: "S3 bucket provisioning and related infrastructure automation.",
+      active: groups["AWS Infra Automation"].some((t) => t.name === "create_s3_bucket"),
+      hint: "Ask: Show S3 capabilities",
+    },
+    {
+      title: "Database",
+      description: "RDS provisioning workflows and deployment support.",
+      active: groups["AWS Infra Automation"].some((t) => t.name === "create_rds_instance"),
+      hint: "Ask: Show RDS capabilities",
+    },
+    {
+      title: "Networking",
+      description: "VPC and subnet-oriented infrastructure setup and validation.",
+      active: groups["AWS Infra Automation"].some((t) => t.name === "create_vpc"),
+      hint: "Ask: Show VPC capabilities",
+    },
+    {
+      title: "Terraform Lifecycle",
+      description: "Generic plan, apply, destroy, and state operations.",
+      active: groups["Terraform Lifecycle (Generic)"].length > 0,
+      hint: "Ask: Show Terraform capabilities",
+    },
+    {
+      title: "Identity & Access",
+      description: "AWS identity checks and permissions context.",
+      active: groups["Identity & Access"].length > 0,
+      hint: "Ask: Show IAM capabilities",
+    },
+    {
+      title: "Guided Workflows",
+      description: "Multi-step orchestration with preflight validation gates.",
+      active: groups["Workflow Orchestration"].length > 0,
+      hint: "Ask: Show workflow capabilities",
+    },
+  ];
+
+  const activeCards = serviceSummary
+    .filter((item) => item.active)
+    .map(
+      (item) =>
+        `<div class="cap-tool"><div class="cap-tool-name">${escapeHtml(item.title)}</div><div class="cap-tool-desc">${escapeHtml(item.description)}</div><div class="cap-tool-hint">${escapeHtml(item.hint)}</div></div>`
+    )
+    .join("");
+
+  capabilitiesContent.innerHTML = activeCards || "No capabilities available.";
+};
+
+const loadCapabilities = async () => {
+  if (!capabilitiesContent) return;
+  capabilitiesContent.textContent = "Loading capabilities...";
+
+  if (mcpSelect.value === "none") {
+    capabilitiesContent.textContent = "MCP disabled. Enable an MCP server to view executable capabilities.";
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/mcp/tools");
+    if (!response.ok) {
+      throw new Error("Unable to fetch MCP tools");
+    }
+    const data = await response.json();
+    renderCapabilities(data.tools || []);
+  } catch (error) {
+    console.error("Failed to load capabilities", error);
+    capabilitiesContent.textContent = "Failed to load capabilities.";
+  }
+};
+
+mcpSelect.addEventListener("change", () => {
+  loadCapabilities();
+});
+
 const parseSse = async (response, onEvent) => {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -239,6 +381,17 @@ composer.addEventListener("submit", (event) => {
   sendMessage(promptInput.value);
 });
 
+promptChips.forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const prompt = chip.dataset.prompt || "";
+    if (!prompt) return;
+    promptInput.value = prompt;
+    promptInput.style.height = "auto";
+    promptInput.style.height = `${promptInput.scrollHeight}px`;
+    promptInput.focus();
+  });
+});
+
 promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -323,3 +476,4 @@ setInterval(refreshAwsIdentity, 30000);
 refreshAwsIdentity();
 
 loadModels();
+loadCapabilities();

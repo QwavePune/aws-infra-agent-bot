@@ -157,7 +157,7 @@ while True:
             active_mcp = aws_mcp if MCP_AVAILABLE and aws_mcp else None
             print("\nAgent:")
             print("-" * 60)
-            print(build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp))
+            print(build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp, user_query))
             continue
             
         conversation_history.append(HumanMessage(content=user_query))

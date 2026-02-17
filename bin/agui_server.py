@@ -338,7 +338,7 @@ async def run_agent(payload: RunRequest):
 
     if is_capabilities_request(payload.message):
         active_mcp = aws_mcp if payload.mcpServer == "aws_terraform" else None
-        response_text = build_capabilities_response(payload.mcpServer, active_mcp)
+        response_text = build_capabilities_response(payload.mcpServer, active_mcp, payload.message)
 
         def stream_capabilities():
             yield sse_event({

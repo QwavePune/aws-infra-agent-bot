@@ -21,6 +21,13 @@ def test_is_capabilities_request_matches_common_phrases():
 def test_build_capabilities_response_includes_active_mcp_tools():
     text = build_capabilities_response("aws_terraform", _MockMCP())
     assert "available capabilities" in text.lower()
+    assert "Discovery & Inventory" in text
+    assert "Show <service> capabilities" in text
+
+
+def test_build_capabilities_response_focus_drilldown():
+    text = build_capabilities_response("aws_terraform", _MockMCP(), "show discovery capabilities")
+    assert "Detailed Capabilities" in text
     assert "list_account_inventory" in text
     assert "describe_resource" in text
 
@@ -28,4 +35,3 @@ def test_build_capabilities_response_includes_active_mcp_tools():
 def test_build_capabilities_response_without_mcp():
     text = build_capabilities_response("none", None)
     assert "No MCP tool server is currently active." in text
-

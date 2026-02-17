@@ -87,7 +87,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         if is_capabilities_request(query):
             active_mcp = aws_mcp if MCP_AVAILABLE and aws_mcp else None
-            response_text = build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp)
+            response_text = build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp, query)
             return {
                 'statusCode': 200,
                 'body': json.dumps({

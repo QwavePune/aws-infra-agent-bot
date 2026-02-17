@@ -21,6 +21,51 @@ const setStatus = (value) => {
   statusMeta.textContent = value;
 };
 
+const escapeHtml = (value) =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+
+const formatToolResult = (result) => {
+  if (!result || typeof result !== "object") {
+    return String(result ?? "");
+  }
+
+  const lines = [];
+  if (Object.prototype.hasOwnProperty.call(result, "success")) {
+    lines.push(`success: ${result.success}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "returncode")) {
+    lines.push(`returncode: ${result.returncode}`);
+  }
+
+  const appendBlock = (label, value) => {
+    if (value === undefined || value === null || value === "") return;
+    lines.push("");
+    lines.push(`${label}:`);
+    lines.push(String(value));
+  };
+
+  appendBlock("stdout", result.stdout);
+  appendBlock("stderr", result.stderr);
+  appendBlock("error", result.error);
+
+  const extra = { ...result };
+  delete extra.success;
+  delete extra.returncode;
+  delete extra.stdout;
+  delete extra.stderr;
+  delete extra.error;
+  if (Object.keys(extra).length > 0) {
+    lines.push("");
+    lines.push("details:");
+    lines.push(JSON.stringify(extra, null, 2));
+  }
+
+  return lines.join("\n");
+};
+
 const addMessage = (role, content) => {
   const message = document.createElement("div");
   message.className = `message ${role}`;
@@ -169,7 +214,13 @@ const sendMessage = async (message) => {
     }
     if (event.type === "TOOL_RESULT") {
       const toolBubble = addMessage("assistant", "");
-      toolBubble.innerHTML = `<strong>Tool: ${event.toolName}</strong><br><pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; font-family: 'Consolas', 'Monaco', monospace;">${JSON.stringify(event.result, null, 2)}</pre>`;
+      const toolName = escapeHtml(String(event.toolName || "unknown_tool"));
+      const rendered = formatToolResult(event.result);
+      toolBubble.innerHTML = `<strong>Tool: ${toolName}</strong>`;
+      const pre = document.createElement("pre");
+      pre.className = "tool-result";
+      pre.textContent = rendered;
+      toolBubble.appendChild(pre);
       chatStream.scrollTop = chatStream.scrollHeight;
     }
     if (event.type === "RUN_ERROR") {

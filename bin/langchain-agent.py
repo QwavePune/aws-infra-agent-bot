@@ -16,6 +16,7 @@ if APP_ROOT not in sys.path:
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import select_llm_interactive, select_credential_source_interactive, initialize_llm
 from core.intent_policy import detect_read_only_intent, is_mutating_tool
+from core.capabilities import is_capabilities_request, build_capabilities_response
 
 # Import MCP server
 try:
@@ -122,6 +123,8 @@ system_prompt = (
     "3. For details about a specific resource: CALL 'describe_resource' with the resource ID or ARN. "
     "4. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
     "5. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+    "5a. For ECS deployments, prefer guided flow: start_ecs_deployment_workflow -> update_ecs_deployment_workflow -> review_ecs_deployment_workflow -> create_ecs_service. "
+    "5b. IMPORTANT: After any Terraform-based create_* tool returns a project_name, you MUST immediately call terraform_plan with that exact project_name, then terraform_apply with that exact project_name in the same run. "
     "6. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
     "7. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
     "8. For read-only user intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools. "
@@ -148,6 +151,13 @@ while True:
             continue
             
         if not user_query:
+            continue
+
+        if is_capabilities_request(user_query):
+            active_mcp = aws_mcp if MCP_AVAILABLE and aws_mcp else None
+            print("\nAgent:")
+            print("-" * 60)
+            print(build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp))
             continue
             
         conversation_history.append(HumanMessage(content=user_query))

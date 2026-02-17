@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
+from core.capabilities import is_capabilities_request, build_capabilities_response
 from core.intent_policy import detect_read_only_intent, is_mutating_tool
 
 # Import MCP server
@@ -332,6 +333,50 @@ async def run_agent(payload: RunRequest):
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Message ID: {message_id}")
 
+    if is_capabilities_request(payload.message):
+        active_mcp = aws_mcp if payload.mcpServer == "aws_terraform" else None
+        response_text = build_capabilities_response(payload.mcpServer, active_mcp)
+
+        def stream_capabilities():
+            yield sse_event({
+                "type": "RUN_STARTED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_START",
+                "messageId": message_id,
+                "role": "assistant",
+                "timestamp": now_ms(),
+            })
+            chunk_size = 100
+            for idx in range(0, len(response_text), chunk_size):
+                chunk = response_text[idx: idx + chunk_size]
+                yield sse_event({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": chunk,
+                    "timestamp": now_ms(),
+                })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_END",
+                "messageId": message_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "RUN_FINISHED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+
+        return StreamingResponse(
+            stream_capabilities(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     history = conversation_store.setdefault(thread_id, [])
     if not history:
         system_prompt = (
@@ -344,6 +389,8 @@ async def run_agent(payload: RunRequest):
             "3. For details about a specific resource: CALL 'describe_resource' with the resource ID or ARN. "
             "4. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
             "5. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+            "5a. For ECS deployments, prefer guided flow: start_ecs_deployment_workflow -> update_ecs_deployment_workflow -> review_ecs_deployment_workflow -> create_ecs_service. "
+            "5b. IMPORTANT: After any Terraform-based create_* tool returns a project_name, you MUST immediately call terraform_plan with that exact project_name, then terraform_apply with that exact project_name in the same run. "
             "6. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
             "7. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
             "8. For read-only user intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools. "

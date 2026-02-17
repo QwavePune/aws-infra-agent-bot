@@ -38,6 +38,7 @@ if APP_ROOT not in sys.path:
 try:
     from core.llm_config import initialize_llm, select_llm_interactive
     from core.intent_policy import detect_read_only_intent, is_mutating_tool
+    from core.capabilities import is_capabilities_request, build_capabilities_response
 except ImportError:
     logger.error("Failed to import core.llm_config")
     raise
@@ -83,6 +84,19 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'statusCode': 400,
                 'body': json.dumps({'error': 'Missing required parameter: query'})
             }
+
+        if is_capabilities_request(query):
+            active_mcp = aws_mcp if MCP_AVAILABLE and aws_mcp else None
+            response_text = build_capabilities_response("aws_terraform" if active_mcp else "none", active_mcp)
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'is_real_deploy': False,
+                    'tool_usage': False
+                }),
+                'response': response_text,
+                'conversation_history': conversation_history
+            }
         
         logger.info(f"Processing query. Real Deploy: {is_real_deploy}")
         
@@ -101,6 +115,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "You MUST use tools for any AWS operations. "
             f"Deployment Integrity: {'REAL_MODE' if is_real_deploy else 'DRY_RUN_MODE'}. "
             "If in 'DRY_RUN_MODE', inform the user that infrastructure will not be actually deployed. "
+            "For ECS deployments, use guided tool chain start_ecs_deployment_workflow -> update_ecs_deployment_workflow -> review_ecs_deployment_workflow -> create_ecs_service. "
+            "After any Terraform-based create_* tool returns project_name, immediately call terraform_plan and terraform_apply with that exact project_name. "
             "For read-only intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools."
         )
         

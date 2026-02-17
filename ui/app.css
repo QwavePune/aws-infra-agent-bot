@@ -141,6 +141,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 70vh;
+  overflow-x: hidden;
 }
 
 .status-row {
@@ -178,6 +179,7 @@ body {
   border-radius: 16px;
   background: var(--panel-alt);
   max-width: 80%;
+  min-width: 0;
   animation: fadeUp 0.3s ease;
 }
 
@@ -201,7 +203,30 @@ body {
 
 .message-body {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.55;
+}
+
+.tool-result {
+  margin-top: 8px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: "Consolas", "Monaco", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.message-body pre {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+  max-width: 100%;
 }
 
 .composer {

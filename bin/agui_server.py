@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
+from core.intent_policy import detect_read_only_intent, is_mutating_tool
 
 # Import MCP server
 try:
@@ -339,11 +340,14 @@ async def run_agent(payload: RunRequest):
             "DO NOT explain what you are going to do. DO NOT ask for permission. DO NOT ask for tool outputs. "
             "THE SYSTEM AUTOMATICALLY EXECUTES YOUR TOOL CALLS AND PROVIDES THE DATA. "
             "1. For any AWS request, first CALL 'get_user_permissions' to verify identity. "
-            "2. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
-            "3. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
-            "4. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
-            "5. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
-            "6. Only provide a text response AFTER all tools have finished and the resource is created."
+            "2. For listing/discovering resources: CALL 'list_account_inventory' for a complete summary, or 'list_aws_resources' to list specific resource types. "
+            "3. For details about a specific resource: CALL 'describe_resource' with the resource ID or ARN. "
+            "4. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
+            "5. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
+            "6. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
+            "7. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
+            "8. For read-only user intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools. "
+            "9. Only provide a text response AFTER all relevant tools have finished."
         )
         history.append(SystemMessage(content=system_prompt))
         logger.info(f"[{run_id}] System prompt initialized")
@@ -356,6 +360,8 @@ async def run_agent(payload: RunRequest):
         history[-1].content = payload.message
         
     logger.debug(f"Conversation history size: {len(history)} messages")
+
+    read_only_intent = detect_read_only_intent(payload.message)
 
     def stream():
         try:
@@ -406,6 +412,17 @@ async def run_agent(payload: RunRequest):
                         tool_call_id = tool_call["id"]
                         
                         logger.info(f"[{run_id}] Executing tool: {tool_name} with args: {tool_args}")
+
+                        if read_only_intent and is_mutating_tool(tool_name):
+                            logger.warning(f"[{run_id}] Blocked mutating tool '{tool_name}' due to read-only user intent")
+                            history.append(ToolMessage(
+                                content=json.dumps({
+                                    "success": False,
+                                    "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource."
+                                }),
+                                tool_call_id=tool_call_id
+                            ))
+                            continue
                         
                         # Execute tool via MCP
                         if payload.mcpServer == "aws_terraform" and aws_mcp:

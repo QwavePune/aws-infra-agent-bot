@@ -18,20 +18,118 @@ def is_capabilities_request(message: str) -> bool:
     return any(phrase in text for phrase in CAPABILITY_PHRASES)
 
 
-def _format_tool_lines(tools: List[Dict[str, Any]]) -> str:
-    lines = []
+def _dedupe_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
     for tool in tools:
-        name = tool.get("name", "unknown_tool")
-        desc = tool.get("description", "").strip() or "No description provided."
-        lines.append(f"- `{name}`: {desc}")
-    return "\n".join(lines)
+        name = (tool.get("name") or "").strip()
+        if not name:
+            continue
+        existing = deduped.get(name)
+        if not existing:
+            deduped[name] = tool
+            continue
+        if len(str(tool.get("description", ""))) > len(str(existing.get("description", ""))):
+            deduped[name] = tool
+    return [deduped[k] for k in sorted(deduped.keys())]
 
 
-def build_capabilities_response(mcp_server_name: Optional[str], mcp_server: Optional[Any]) -> str:
+def _tool_names(tools: List[Dict[str, Any]]) -> set:
+    return {t.get("name", "").strip() for t in tools if t.get("name")}
+
+
+def _service_summary_sections(names: set) -> List[str]:
+    sections = []
+    if {"list_account_inventory", "list_aws_resources", "describe_resource"} & names:
+        sections.extend([
+            "- Discovery & Inventory: Account-wide listing and detailed resource lookup.",
+            "  - Ask for details: `Show resource discovery capabilities`",
+        ])
+    if {"create_ec2_instance", "create_lambda_function", "create_ecs_service"} & names:
+        sections.extend([
+            "- Compute: Provision and manage EC2, Lambda, and ECS deployment flows.",
+            "  - Ask for details: `Show ECS capabilities` or `Show EC2 capabilities`",
+        ])
+    if "create_s3_bucket" in names:
+        sections.extend([
+            "- Storage: S3 bucket provisioning and related setup.",
+            "  - Ask for details: `Show S3 capabilities`",
+        ])
+    if "create_rds_instance" in names:
+        sections.extend([
+            "- Database: RDS provisioning workflows.",
+            "  - Ask for details: `Show RDS capabilities`",
+        ])
+    if "create_vpc" in names:
+        sections.extend([
+            "- Networking: VPC/subnet infrastructure setup.",
+            "  - Ask for details: `Show VPC capabilities`",
+        ])
+    if {"terraform_plan", "terraform_apply", "terraform_destroy", "get_infrastructure_state"} & names:
+        sections.extend([
+            "- Terraform Lifecycle (Generic): Plan, apply, destroy, and state operations.",
+            "  - Ask for details: `Show Terraform capabilities`",
+        ])
+    if "get_user_permissions" in names:
+        sections.extend([
+            "- Identity & Access: Current AWS identity and permission context.",
+            "  - Ask for details: `Show IAM capabilities`",
+        ])
+    if {"start_ecs_deployment_workflow", "update_ecs_deployment_workflow", "review_ecs_deployment_workflow"} & names:
+        sections.extend([
+            "- Guided Workflows: Multi-step orchestration with preflight validation.",
+            "  - Ask for details: `Show workflow capabilities`",
+        ])
+    return sections
+
+
+def _extract_focus(message: str) -> Optional[str]:
+    text = (message or "").lower()
+    focus_keywords = {
+        "discovery": ("discovery", "inventory", "resource list", "describe"),
+        "ecs": ("ecs", "container", "fargate"),
+        "ec2": ("ec2", "instance", "compute"),
+        "lambda": ("lambda",),
+        "s3": ("s3", "bucket", "storage"),
+        "rds": ("rds", "database", "postgres"),
+        "vpc": ("vpc", "network", "subnet"),
+        "terraform": ("terraform", "plan", "apply", "destroy"),
+        "identity": ("iam", "identity", "permission", "access"),
+        "workflow": ("workflow", "guided"),
+    }
+    for focus, words in focus_keywords.items():
+        if any(w in text for w in words):
+            return focus
+    return None
+
+
+def _focus_tools(tools: List[Dict[str, Any]], focus: str) -> List[Dict[str, Any]]:
+    name_map = {
+        "discovery": {"list_account_inventory", "list_aws_resources", "describe_resource"},
+        "ecs": {"create_ecs_service", "start_ecs_deployment_workflow", "update_ecs_deployment_workflow", "review_ecs_deployment_workflow"},
+        "ec2": {"create_ec2_instance"},
+        "lambda": {"create_lambda_function"},
+        "s3": {"create_s3_bucket"},
+        "rds": {"create_rds_instance"},
+        "vpc": {"create_vpc"},
+        "terraform": {"terraform_plan", "terraform_apply", "terraform_destroy", "get_infrastructure_state"},
+        "identity": {"get_user_permissions"},
+        "workflow": {"start_ecs_deployment_workflow", "update_ecs_deployment_workflow", "review_ecs_deployment_workflow"},
+    }
+    allowed = name_map.get(focus, set())
+    return [t for t in tools if t.get("name") in allowed]
+
+
+def build_capabilities_response(mcp_server_name: Optional[str], mcp_server: Optional[Any], user_message: Optional[str] = None) -> str:
     """Build a context-independent capabilities summary for the active MCP server."""
     base = [
+        "Capabilities Overview",
+        "",
         "I can help with cloud infrastructure planning and execution workflows.",
-        "For this session, here are my available capabilities:",
+        "",
+        "Core Assistance:",
+        "- Explain outputs from tool runs and identify next actions.",
+        "- Guide multi-step infrastructure workflows with validations.",
+        "",
     ]
 
     if mcp_server_name == "aws_terraform" and mcp_server:
@@ -40,13 +138,26 @@ def build_capabilities_response(mcp_server_name: Optional[str], mcp_server: Opti
         except Exception:
             tools = []
 
+        tools = _dedupe_tools(tools)
         if tools:
-            base.append("- I can use the following MCP tools:")
-            base.append(_format_tool_lines(tools))
-            base.append("- I can also explain tool outputs and suggest next actions.")
+            focus = _extract_focus(user_message or "")
+            if focus:
+                focused_tools = _focus_tools(tools, focus)
+                if focused_tools:
+                    base.append(f"Detailed Capabilities ({focus.upper()}):")
+                    for tool in focused_tools:
+                        name = tool.get("name", "unknown_tool")
+                        desc = tool.get("description", "").strip() or "No description provided."
+                        base.append(f"- `{name}`: {desc}")
+                    return "\n".join(base)
+
+            base.append("Available MCP Capabilities:")
+            base.extend(_service_summary_sections(_tool_names(tools)))
+            base.append("")
+            base.append("For detailed tool-level output, ask: `Show <service> capabilities`.")
             return "\n".join(base)
 
+    base.append("Available MCP Capabilities:")
     base.append("- No MCP tool server is currently active.")
-    base.append("- I can still answer general guidance questions, but cannot execute infra actions until MCP is enabled.")
+    base.append("- I can still answer guidance questions, but cannot execute infra actions until MCP is enabled.")
     return "\n".join(base)
-

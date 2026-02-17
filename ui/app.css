@@ -181,6 +181,9 @@ body {
   max-width: 80%;
   min-width: 0;
   animation: fadeUp 0.3s ease;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .message.user {
@@ -206,6 +209,9 @@ body {
   overflow-wrap: anywhere;
   word-break: break-word;
   line-height: 1.55;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .tool-result {

@@ -9,6 +9,7 @@ fastapi
 uvicorn
 httpx
 httpx-sse
+python-multipart
 
 # Core AI Framework
 langchain>=0.3.0

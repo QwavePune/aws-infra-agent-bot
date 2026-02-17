@@ -169,7 +169,7 @@ const sendMessage = async (message) => {
     }
     if (event.type === "TOOL_RESULT") {
       const toolBubble = addMessage("assistant", "");
-      toolBubble.innerHTML = `<strong>Tool: ${event.toolName}</strong><br><pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; font-family: 'Consolas', 'Monaco', monospace;">${JSON.stringify(event.result, null, 2)}</pre>`;
+      toolBubble.innerHTML = `<strong>Tool: ${event.toolName}</strong><br><pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; overflow: hidden; max-height: 400px; overflow-y: auto; font-size: 12px; font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap; word-wrap: break-word; word-break: break-word; margin: 0; max-width: 100%; box-sizing: border-box;">${JSON.stringify(event.result, null, 2)}</pre>`;
       chatStream.scrollTop = chatStream.scrollHeight;
     }
     if (event.type === "RUN_ERROR") {

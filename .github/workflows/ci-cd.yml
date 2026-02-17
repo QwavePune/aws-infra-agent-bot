@@ -11,11 +11,11 @@ on:
       - 'bugfix/**'
       - 'release/**'
       - 'hotfix/**'
- pull_request:
+  pull_request:
     branches:
       - main
       - master
- workflow_dispatch:
+  workflow_dispatch:
     inputs:
       aws_region:
         description: "AWS region override (optional)"
@@ -23,7 +23,7 @@ on:
         default: "ap-south-1"
 
 env:
-  AWS_REGION: ${{ inputs.aws_region || vars.AWS_REGION || 'ap-south-1' }}
+  AWS_REGION: ${{ github.event.inputs.aws_region || 'ap-south-1' }}
   PYTHON_VERSION: "3.11"
   ECR_REPOSITORY: langchain-agent
 
@@ -34,13 +34,13 @@ jobs:
   regression:
     name: Regression Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     
     steps:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -58,6 +58,10 @@ jobs:
       - name: Run full regression suite on main/master pushes
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         run: make test-regression
+
+      - name: Run fast regression suite on non-main branch pushes
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master'
+        run: make test-fast
 
   # ============================================================================
   # STAGE 1: BUILD & LINT
@@ -222,7 +226,7 @@ jobs:
           ECS_TASK_ROLE_ARN: ${{ secrets.ECS_TASK_ROLE_ARN }}
           OPENAI_SECRET_ARN: ${{ secrets.OPENAI_SECRET_ARN }}
           PERPLEXITY_SECRET_ARN: ${{ secrets.PERPLEXITY_SECRET_ARN }}
-          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
+          LLM_PROVIDER: openai
         run: |
           jq \
             --arg image "$IMAGE_URI" \

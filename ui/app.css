@@ -179,6 +179,9 @@ body {
   background: var(--panel-alt);
   max-width: 80%;
   animation: fadeUp 0.3s ease;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .message.user {
@@ -202,6 +205,9 @@ body {
 .message-body {
   white-space: pre-wrap;
   line-height: 1.55;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .composer {

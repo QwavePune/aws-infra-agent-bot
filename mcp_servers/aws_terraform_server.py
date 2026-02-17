@@ -11,6 +11,7 @@ import subprocess
 import logging
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
@@ -1004,8 +1005,509 @@ class MCPAWSManagerServer:
                     },
                     "required": ["architecture"]
                 }
+            },
+            {
+                "name": "list_aws_resources",
+                "description": "List AWS resources in the account by type (ec2, s3, rds, lambda, vpc, etc.)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource_type": {
+                            "type": "string",
+                            "description": "AWS resource type to list (ec2_instances, s3_buckets, rds_instances, lambda_functions, vpcs, security_groups, subnets, etc.). If not specified, lists all resource types.",
+                            "enum": ["ec2_instances", "s3_buckets", "rds_instances", "lambda_functions", "vpcs", "security_groups", "subnets", "iam_roles", "iam_policies", "dynamodb_tables", "all"]
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region to list resources from (default: current region)"
+                        },
+                        "filters": {
+                            "type": "object",
+                            "description": "Optional filters (e.g., {Name: value, Status: active})"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "describe_resource",
+                "description": "Get detailed information about a specific AWS resource",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource_id": {
+                            "type": "string",
+                            "description": "AWS resource ID, ARN, or name (required)"
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "AWS region (optional, will try to infer from ARN)"
+                        }
+                    },
+                    "required": ["resource_id"]
+                }
+            },
+            {
+                "name": "list_account_inventory",
+                "description": "Get a summary inventory of all AWS resources in the account across all regions",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "regions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of regions to scan (default: all available regions)"
+                        },
+                        "include_details": {
+                            "type": "boolean",
+                            "description": "Include detailed information for each resource (default: false)"
+                        }
+                    }
+                }
             }
         ]
+    
+    def _list_aws_resources(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """List AWS resources by type"""
+        resource_type = params.get("resource_type", "all")
+        region = params.get("region")
+        filters = params.get("filters", {})
+        
+        try:
+            session = boto3.Session()
+            
+            # Get region(s) to scan
+            if region:
+                regions_to_scan = [region]
+            else:
+                # Use current region or us-east-1
+                regions_to_scan = [session.region_name or "us-east-1"]
+            
+            resources = {}
+            
+            # EC2 Instances
+            if resource_type in ["ec2_instances", "all"]:
+                instances_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        ec2_client = session.client("ec2", region_name=reg)
+                        response = ec2_client.describe_instances()
+                        instances = []
+                        for reservation in response.get("Reservations", []):
+                            for instance in reservation.get("Instances", []):
+                                instances.append({
+                                    "InstanceId": instance["InstanceId"],
+                                    "InstanceType": instance["InstanceType"],
+                                    "State": instance["State"]["Name"],
+                                    "LaunchTime": instance["LaunchTime"].isoformat() if isinstance(instance["LaunchTime"], object) else str(instance["LaunchTime"]),
+                                    "PublicIpAddress": instance.get("PublicIpAddress", "N/A"),
+                                    "PrivateIpAddress": instance.get("PrivateIpAddress", "N/A"),
+                                    "Tags": {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
+                                })
+                        if instances:
+                            instances_by_region[reg] = instances
+                    except Exception as e:
+                        logger.warning(f"Failed to list EC2 instances in {reg}: {e}")
+                if instances_by_region:
+                    resources["ec2_instances"] = instances_by_region
+            
+            # S3 Buckets
+            if resource_type in ["s3_buckets", "all"]:
+                try:
+                    s3_client = session.client("s3")
+                    response = s3_client.list_buckets()
+                    buckets = []
+                    for bucket in response.get("Buckets", []):
+                        buckets.append({
+                            "BucketName": bucket["Name"],
+                            "CreationDate": bucket["CreationDate"].isoformat() if isinstance(bucket["CreationDate"], object) else str(bucket["CreationDate"])
+                        })
+                    if buckets:
+                        resources["s3_buckets"] = buckets
+                except Exception as e:
+                    logger.warning(f"Failed to list S3 buckets: {e}")
+            
+            # RDS Instances
+            if resource_type in ["rds_instances", "all"]:
+                rds_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        rds_client = session.client("rds", region_name=reg)
+                        response = rds_client.describe_db_instances()
+                        instances = []
+                        for db in response.get("DBInstances", []):
+                            instances.append({
+                                "DBInstanceIdentifier": db["DBInstanceIdentifier"],
+                                "DBInstanceClass": db["DBInstanceClass"],
+                                "Engine": db["Engine"],
+                                "DBInstanceStatus": db["DBInstanceStatus"],
+                                "AllocatedStorage": db.get("AllocatedStorage", "N/A"),
+                                "Endpoint": db.get("Endpoint", {}).get("Address", "N/A")
+                            })
+                        if instances:
+                            rds_by_region[reg] = instances
+                    except Exception as e:
+                        logger.warning(f"Failed to list RDS instances in {reg}: {e}")
+                if rds_by_region:
+                    resources["rds_instances"] = rds_by_region
+            
+            # Lambda Functions
+            if resource_type in ["lambda_functions", "all"]:
+                lambda_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        lambda_client = session.client("lambda", region_name=reg)
+                        response = lambda_client.list_functions()
+                        functions = []
+                        for func in response.get("Functions", []):
+                            functions.append({
+                                "FunctionName": func["FunctionName"],
+                                "Runtime": func.get("Runtime", "N/A"),
+                                "Handler": func.get("Handler", "N/A"),
+                                "CodeSize": func.get("CodeSize", 0),
+                                "LastModified": func.get("LastModified", "N/A")
+                            })
+                        if functions:
+                            lambda_by_region[reg] = functions
+                    except Exception as e:
+                        logger.warning(f"Failed to list Lambda functions in {reg}: {e}")
+                if lambda_by_region:
+                    resources["lambda_functions"] = lambda_by_region
+            
+            # VPCs
+            if resource_type in ["vpcs", "all"]:
+                vpcs_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        ec2_client = session.client("ec2", region_name=reg)
+                        response = ec2_client.describe_vpcs()
+                        vpcs = []
+                        for vpc in response.get("Vpcs", []):
+                            vpcs.append({
+                                "VpcId": vpc["VpcId"],
+                                "CidrBlock": vpc["CidrBlock"],
+                                "State": vpc["State"],
+                                "IsDefault": vpc.get("IsDefault", False),
+                                "Tags": {tag["Key"]: tag["Value"] for tag in vpc.get("Tags", [])}
+                            })
+                        if vpcs:
+                            vpcs_by_region[reg] = vpcs
+                    except Exception as e:
+                        logger.warning(f"Failed to list VPCs in {reg}: {e}")
+                if vpcs_by_region:
+                    resources["vpcs"] = vpcs_by_region
+            
+            # Security Groups
+            if resource_type in ["security_groups", "all"]:
+                sg_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        ec2_client = session.client("ec2", region_name=reg)
+                        response = ec2_client.describe_security_groups()
+                        sgs = []
+                        for sg in response.get("SecurityGroups", []):
+                            sgs.append({
+                                "GroupId": sg["GroupId"],
+                                "GroupName": sg["GroupName"],
+                                "Description": sg.get("Description", ""),
+                                "VpcId": sg.get("VpcId", "N/A"),
+                                "IngressRules": len(sg.get("IpPermissions", [])),
+                                "EgressRules": len(sg.get("IpPermissionsEgress", []))
+                            })
+                        if sgs:
+                            sg_by_region[reg] = sgs
+                    except Exception as e:
+                        logger.warning(f"Failed to list Security Groups in {reg}: {e}")
+                if sg_by_region:
+                    resources["security_groups"] = sg_by_region
+            
+            # Subnets
+            if resource_type in ["subnets", "all"]:
+                subnet_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        ec2_client = session.client("ec2", region_name=reg)
+                        response = ec2_client.describe_subnets()
+                        subnets = []
+                        for subnet in response.get("Subnets", []):
+                            subnets.append({
+                                "SubnetId": subnet["SubnetId"],
+                                "VpcId": subnet["VpcId"],
+                                "CidrBlock": subnet["CidrBlock"],
+                                "AvailabilityZone": subnet["AvailabilityZone"],
+                                "AvailableIpAddressCount": subnet.get("AvailableIpAddressCount", 0)
+                            })
+                        if subnets:
+                            subnet_by_region[reg] = subnets
+                    except Exception as e:
+                        logger.warning(f"Failed to list Subnets in {reg}: {e}")
+                if subnet_by_region:
+                    resources["subnets"] = subnet_by_region
+            
+            # IAM Roles
+            if resource_type in ["iam_roles", "all"]:
+                try:
+                    iam_client = session.client("iam")
+                    response = iam_client.list_roles()
+                    roles = []
+                    for role in response.get("Roles", []):
+                        roles.append({
+                            "RoleName": role["RoleName"],
+                            "RoleId": role["RoleId"],
+                            "Arn": role["Arn"],
+                            "CreateDate": role["CreateDate"].isoformat() if isinstance(role["CreateDate"], object) else str(role["CreateDate"])
+                        })
+                    if roles:
+                        resources["iam_roles"] = roles
+                except Exception as e:
+                    logger.warning(f"Failed to list IAM roles: {e}")
+            
+            # DynamoDB Tables
+            if resource_type in ["dynamodb_tables", "all"]:
+                dynamodb_by_region = {}
+                for reg in regions_to_scan:
+                    try:
+                        dynamodb_client = session.client("dynamodb", region_name=reg)
+                        response = dynamodb_client.list_tables()
+                        tables = []
+                        for table_name in response.get("TableNames", []):
+                            tables.append({
+                                "TableName": table_name
+                            })
+                        if tables:
+                            dynamodb_by_region[reg] = tables
+                    except Exception as e:
+                        logger.warning(f"Failed to list DynamoDB tables in {reg}: {e}")
+                if dynamodb_by_region:
+                    resources["dynamodb_tables"] = dynamodb_by_region
+            
+            return {
+                "success": True,
+                "region": region or session.region_name or "us-east-1",
+                "resources": resources,
+                "resource_count": sum(
+                    len(v) if isinstance(v, list) else sum(len(vv) for vv in v.values() if isinstance(vv, list))
+                    for v in resources.values()
+                )
+            }
+        
+        except Exception as e:
+            logger.error(f"Error listing AWS resources: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to list resources: {str(e)}"
+            }
+    
+    def _describe_resource(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get detailed information about a specific AWS resource"""
+        resource_id = params.get("resource_id")
+        region = params.get("region")
+        
+        if not resource_id:
+            return {"success": False, "error": "resource_id is required"}
+        
+        try:
+            parsed = self._parse_resource_identifier(resource_id)
+            
+            session = boto3.Session()
+            if not region:
+                region = parsed.get("region") if parsed else (session.region_name or "us-east-1")
+            
+            # Determine resource type and fetch details
+            if resource_id.startswith("i-"):
+                # EC2 Instance
+                ec2_client = session.client("ec2", region_name=region)
+                response = ec2_client.describe_instances(InstanceIds=[resource_id])
+                if response["Reservations"]:
+                    instance = response["Reservations"][0]["Instances"][0]
+                    return {
+                        "success": True,
+                        "resource_type": "EC2 Instance",
+                        "resource_id": resource_id,
+                        "details": {
+                            "InstanceId": instance["InstanceId"],
+                            "InstanceType": instance["InstanceType"],
+                            "State": instance["State"]["Name"],
+                            "LaunchTime": str(instance.get("LaunchTime")),
+                            "PublicIpAddress": instance.get("PublicIpAddress", "N/A"),
+                            "PrivateIpAddress": instance.get("PrivateIpAddress", "N/A"),
+                            "SubnetId": instance.get("SubnetId"),
+                            "VpcId": instance.get("VpcId"),
+                            "SecurityGroups": [sg["GroupId"] for sg in instance.get("SecurityGroups", [])],
+                            "Tags": {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
+                        }
+                    }
+            
+            elif resource_id.startswith("vpc-"):
+                # VPC
+                ec2_client = session.client("ec2", region_name=region)
+                response = ec2_client.describe_vpcs(VpcIds=[resource_id])
+                if response["Vpcs"]:
+                    vpc = response["Vpcs"][0]
+                    return {
+                        "success": True,
+                        "resource_type": "VPC",
+                        "resource_id": resource_id,
+                        "details": {
+                            "VpcId": vpc["VpcId"],
+                            "CidrBlock": vpc["CidrBlock"],
+                            "State": vpc["State"],
+                            "IsDefault": vpc.get("IsDefault", False),
+                            "Tags": {tag["Key"]: tag["Value"] for tag in vpc.get("Tags", [])}
+                        }
+                    }
+            
+            elif resource_id.startswith("sg-"):
+                # Security Group
+                ec2_client = session.client("ec2", region_name=region)
+                response = ec2_client.describe_security_groups(GroupIds=[resource_id])
+                if response["SecurityGroups"]:
+                    sg = response["SecurityGroups"][0]
+                    return {
+                        "success": True,
+                        "resource_type": "Security Group",
+                        "resource_id": resource_id,
+                        "details": {
+                            "GroupId": sg["GroupId"],
+                            "GroupName": sg["GroupName"],
+                            "Description": sg.get("Description", ""),
+                            "VpcId": sg.get("VpcId", "N/A"),
+                            "IngressRules": sg.get("IpPermissions", []),
+                            "EgressRules": sg.get("IpPermissionsEgress", [])
+                        }
+                    }
+            
+            # Try S3 bucket
+            elif not any(resource_id.startswith(prefix) for prefix in ["i-", "vpc-", "sg-", "subnet-", "ami-"]):
+                try:
+                    s3_client = session.client("s3")
+                    s3_client.head_bucket(Bucket=resource_id)
+                    response = s3_client.get_bucket_location(Bucket=resource_id)
+                    return {
+                        "success": True,
+                        "resource_type": "S3 Bucket",
+                        "resource_id": resource_id,
+                        "details": {
+                            "BucketName": resource_id,
+                            "Region": response.get("LocationConstraint", "us-east-1")
+                        }
+                    }
+                except:
+                    pass
+            
+            return {
+                "success": False,
+                "error": f"Could not describe resource '{resource_id}'. Resource not found or type not supported."
+            }
+        
+        except Exception as e:
+            logger.error(f"Error describing resource: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to describe resource: {str(e)}"
+            }
+    
+    def _list_account_inventory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get a summary inventory of all AWS resources"""
+        regions_param = params.get("regions")
+        include_details = params.get("include_details", False)
+        
+        try:
+            session = boto3.Session()
+            
+            # Get regions to scan
+            if regions_param:
+                regions_to_scan = regions_param
+            else:
+                try:
+                    ec2_client = session.client("ec2")
+                    response = ec2_client.describe_regions()
+                    regions_to_scan = [region["RegionName"] for region in response["Regions"]]
+                except:
+                    regions_to_scan = [session.region_name or "us-east-1"]
+            
+            inventory = {
+                "summary": {},
+                "by_region": {},
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Scan each region
+            for region in regions_to_scan:
+                region_resources = {}
+                
+                try:
+                    ec2_client = session.client("ec2", region_name=region)
+                    
+                    # Count EC2 instances
+                    response = ec2_client.describe_instances()
+                    instance_count = sum(len(res["Instances"]) for res in response["Reservations"])
+                    region_resources["ec2_instances"] = instance_count
+                    
+                    # Count VPCs
+                    response = ec2_client.describe_vpcs()
+                    region_resources["vpcs"] = len(response["Vpcs"])
+                    
+                    # Count Security Groups
+                    response = ec2_client.describe_security_groups()
+                    region_resources["security_groups"] = len(response["SecurityGroups"])
+                    
+                    # Count Subnets
+                    response = ec2_client.describe_subnets()
+                    region_resources["subnets"] = len(response["Subnets"])
+                    
+                    # RDS Instances
+                    try:
+                        rds_client = session.client("rds", region_name=region)
+                        response = rds_client.describe_db_instances()
+                        region_resources["rds_instances"] = len(response["DBInstances"])
+                    except:
+                        region_resources["rds_instances"] = 0
+                    
+                    # Lambda Functions
+                    try:
+                        lambda_client = session.client("lambda", region_name=region)
+                        response = lambda_client.list_functions()
+                        region_resources["lambda_functions"] = len(response["Functions"])
+                    except:
+                        region_resources["lambda_functions"] = 0
+                    
+                    # DynamoDB Tables
+                    try:
+                        dynamodb_client = session.client("dynamodb", region_name=region)
+                        response = dynamodb_client.list_tables()
+                        region_resources["dynamodb_tables"] = len(response["TableNames"])
+                    except:
+                        region_resources["dynamodb_tables"] = 0
+                    
+                except Exception as e:
+                    logger.warning(f"Error scanning region {region}: {e}")
+                    region_resources["error"] = str(e)
+                
+                if region_resources:
+                    inventory["by_region"][region] = region_resources
+            
+            # Calculate global summary
+            summary = {}
+            for region_data in inventory["by_region"].values():
+                for resource_type, count in region_data.items():
+                    if resource_type != "error" and isinstance(count, int):
+                        summary[resource_type] = summary.get(resource_type, 0) + count
+            
+            inventory["summary"] = summary
+            inventory["total_resources"] = sum(summary.values())
+            inventory["regions_scanned"] = len([r for r in inventory["by_region"] if "error" not in inventory["by_region"][r]])
+            
+            return {
+                "success": True,
+                "inventory": inventory
+            }
+        
+        except Exception as e:
+            logger.error(f"Error generating account inventory: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to generate inventory: {str(e)}"
+            }
     
     def _parse_resource_identifier(self, resource_id: str) -> Optional[Dict[str, str]]:
         """
@@ -1294,7 +1796,10 @@ class MCPAWSManagerServer:
             "get_user_permissions": self._get_user_permissions,
             "parse_mermaid_architecture": self._parse_mermaid_architecture,
             "generate_terraform_from_architecture": self._generate_terraform_from_architecture,
-            "deploy_architecture": self._deploy_architecture
+            "deploy_architecture": self._deploy_architecture,
+            "list_aws_resources": self._list_aws_resources,
+            "describe_resource": self._describe_resource,
+            "list_account_inventory": self._list_account_inventory
         }
         
         handler = handlers.get(tool_name)

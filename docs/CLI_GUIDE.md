@@ -4,13 +4,13 @@ This guide documents the core CLI components and configuration logic of the AWS 
 
 ---
 
-## 🗝️ `setup_keychain.py`
+## 🗝️ `bin/setup_keychain.py`
 The **Credential Setup Utility**. This script allows you to securely store your LLM API keys (Perplexity, Anthropic, OpenAI, etc.) in various encrypted storage backends instead of hardcoding them or leaving them in plain text.
 
 ### Usage
 Run the script and follow the interactive prompts:
 ```bash
-python3 setup_keychain.py
+python3 bin/setup_keychain.py
 ```
 
 ### Storage Options:
@@ -19,12 +19,12 @@ python3 setup_keychain.py
 3.  **AWS Secrets Manager**: Stores keys in AWS Secrets Manager. Requires `AWS_REGION` in `.env`.
 
 ### Commands:
-- `python3 setup_keychain.py local` - Setup local keyring only.
-- `python3 setup_keychain.py verify` - Check if keys are correctly stored and accessible.
+- `python3 bin/setup_keychain.py local` - Setup local keyring only.
+- `python3 bin/setup_keychain.py verify` - Check if keys are correctly stored and accessible.
 
 ---
 
-## ⚙️ `llm_config.py`
+## ⚙️ `core/llm_config.py`
 The **Configuration Engine**. This module is the "brain" for LLM management. It handles:
 - **Provider Mapping**: Supports OpenAI, Anthropic, Google Gemini, Perplexity, and Ollama.
 - **Credential Priority**: Automatically looks for API keys in the following order:
@@ -37,7 +37,7 @@ The **Configuration Engine**. This module is the "brain" for LLM management. It 
 
 ---
 
-## 🤖 `langchain-agent.py`
+## 🤖 `bin/langchain-agent.py`
 The **AWS Infrastructure CLI Agent**. A robust terminal-based counterpart to the AG-UI, capable of full infrastructure management.
 
 ### Features:
@@ -49,7 +49,7 @@ The **AWS Infrastructure CLI Agent**. A robust terminal-based counterpart to the
 ### Usage:
 1. **Start the agent**:
    ```bash
-   python3 langchain-agent.py
+   python3 bin/langchain-agent.py
    ```
 2. **Setup**: Follow the interactive prompts to confirm your AWS profile and LLM provider.
 3. **Infrastructure Management**:
@@ -61,7 +61,7 @@ The **AWS Infrastructure CLI Agent**. A robust terminal-based counterpart to the
 You can skip the interactive selection by setting an environment variable:
 ```bash
 export LLM_PROVIDER=openai
-python3 langchain-agent.py
+python3 bin/langchain-agent.py
 ```
 
 ---

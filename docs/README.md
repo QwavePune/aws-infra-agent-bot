@@ -11,6 +11,7 @@ The primary goal of this project is to empower users to build and manage complex
 [x] Create an EC2 instance [follow up questions to be answered]
 [x] Use this mermaid code and build the infrastructure [provide a valid mermaid diagram for AWS]
 [x] List all AWS resources in my account
+[x] Who is the audience for this agent?
 ---
 
 ## ✨ Key Features
@@ -26,9 +27,9 @@ The primary goal of this project is to empower users to build and manage complex
 - **Identity Awareness:** Real-time verification of the active AWS Account ID and IAM User/Role in the header.
 
 ### 🤖 Advanced CLI Agent
-- **Infrastructure Ready:** The `langchain-agent.py` CLI is a full-featured infrastructure engine, supporting the same tool-calling loops as the Web UI.
+- **Infrastructure Ready:** The `bin/langchain-agent.py` CLI is a full-featured infrastructure engine, supporting the same tool-calling loops as the Web UI.
 - **Identity Check:** Automatically verifies AWS session health and profile context on startup.
-- **Multi-LLM Setup:** centralized `setup_keychain.py` for configuring OpenAI, Gemini, Perplexity, and more.
+- **Multi-LLM Setup:** centralized `bin/setup_keychain.py` for configuring OpenAI, Gemini, Perplexity, and more.
 
 ---
 
@@ -53,17 +54,17 @@ The primary goal of this project is to empower users to build and manage complex
 
 3. **Setup API Keys:**
    ```bash
-   python3 setup_keychain.py
+   python3 bin/setup_keychain.py
    ```
    Choose your preferred storage (Local Keyring, AWS, or Azure) and enter your LLM API keys (e.g., Anthropic, OpenAI).
 
 ### 🏃 Running the Agent
 1. **Start the Backend Server:**
    ```bash
-   python3 agui_server.py
+   python3 bin/agui_server.py
    ```
 2. **Open the UI:**
-   Navigate to `http://localhost:8000` in your browser.
+   Navigate to `http://localhost:9595` in your browser.
 
 ---
 
@@ -82,10 +83,10 @@ The primary goal of this project is to empower users to build and manage complex
 ---
 
 ## 🏗️ Project Structure
-- `agui_server.py`: FastAPI backend handling model routing and tool execution.
+- `bin/agui_server.py`: FastAPI backend handling model routing and tool execution.
 - `mcp_servers/`: Contains the AWS/Terraform MCP server implementation.
 - `ui/`: Modern web frontend (HTML/JS/CSS).
-- `llm_config.py`: Centralized LLM and credential management.
+- `core/llm_config.py`: Centralized LLM and credential management.
 - `terraform_workspace/`: Local directory where the agent generates and manages IaC code.
 
 ---

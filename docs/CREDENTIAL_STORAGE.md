@@ -9,7 +9,7 @@
 - **Use when**: Developing on your personal machine
 
 ```bash
-python3 setup_keychain.py
+python3 bin/setup_keychain.py
 # Choose option 1: Local Keyring
 ```
 
@@ -20,7 +20,7 @@ python3 setup_keychain.py
 - **Use when**: Team collaboration, production, CI/CD pipelines
 
 ```bash
-python3 setup_keychain.py
+python3 bin/setup_keychain.py
 # Choose option 2: Azure KeyVault
 # Enter your vault URL when prompted
 ```
@@ -44,19 +44,19 @@ cp .env.example .env
 
 ```bash
 # Interactive setup (choose provider, then storage backend)
-python3 setup_keychain.py
+python3 bin/setup_keychain.py
 
 # Setup local keyring directly (will prompt for provider)
-python3 setup_keychain.py local
+python3 bin/setup_keychain.py local
 
 # Verify which methods are configured for ALL providers
-python3 setup_keychain.py verify
+python3 bin/setup_keychain.py verify
 ```
 
 ### Run Agent
 
 ```bash
-python3 langchain-agent.py
+python3 bin/langchain-agent.py
 ```
 
 ### Manage Credentials
@@ -92,7 +92,7 @@ az keyvault secret show --vault-name <vault-name> --name perplexity-api-key
 az keyvault secret delete --vault-name <vault-name> --name perplexity-api-key
 
 # Update a secret (re-run setup script)
-python3 setup_keychain.py azure
+python3 bin/setup_keychain.py azure
 ```
 
 ---
@@ -150,7 +150,7 @@ az account show
 ### 3. Set up the agent
 
 ```bash
-python3 setup_keychain.py
+python3 bin/setup_keychain.py
 # Choose option 2: Azure KeyVault
 # Enter your vault URL from step 1
 ```
@@ -172,7 +172,7 @@ export AZURE_KEYVAULT_URL="https://mykeyvault.vault.azure.net/"
 Then run:
 
 ```bash
-python3 langchain-agent.py
+python3 bin/langchain-agent.py
 ```
 
 ---

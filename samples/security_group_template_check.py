@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Test security group reuse logic"""
 
+from pathlib import Path
 import sys
-sys.path.insert(0, '.')
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from mcp_servers.aws_terraform_server import AWSInfrastructureTemplates
 

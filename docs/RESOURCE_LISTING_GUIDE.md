@@ -28,7 +28,7 @@ The AWS Infrastructure Agent now supports comprehensive AWS resource discovery a
 
 ```bash
 # List all EC2 instances in the current region
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_aws_resources",
@@ -38,7 +38,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # List all S3 buckets
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_aws_resources",
@@ -48,7 +48,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # List all Lambda functions in us-west-2
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_aws_resources",
@@ -59,7 +59,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # List all resources (EC2, S3, RDS, Lambda, VPCs, etc.)
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_aws_resources",
@@ -129,7 +129,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
 
 ```bash
 # Describe a specific EC2 instance
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "describe_resource",
@@ -139,7 +139,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # Describe a VPC
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "describe_resource",
@@ -149,7 +149,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # Describe a security group
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "describe_resource",
@@ -160,7 +160,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # Describe an S3 bucket
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "describe_resource",
@@ -212,7 +212,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
 
 ```bash
 # Get account inventory for all regions
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_account_inventory",
@@ -220,7 +220,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # Get inventory for specific regions
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_account_inventory",
@@ -230,7 +230,7 @@ curl -X POST http://localhost:8000/api/mcp/execute \
   }'
 
 # Get inventory with detailed information
-curl -X POST http://localhost:8000/api/mcp/execute \
+curl -X POST http://localhost:9595/api/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "list_account_inventory",
@@ -294,7 +294,7 @@ The new resource listing tools are accessible through the AGUI web interface:
    python3 bin/agui_server.py
    ```
 
-2. **Navigate to:** `http://localhost:8000`
+2. **Navigate to:** `http://localhost:9595`
 
 3. **Select MCP Mode:** Choose "AWS Manager (MCP)" from the MCP Server dropdown
 

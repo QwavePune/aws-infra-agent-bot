@@ -7,7 +7,7 @@ This document describes the high-level architecture of the AWS Infrastructure Ag
 ```mermaid
 graph TD
     subgraph Setup_Phase [1. Credential Setup]
-        U[User] -->|Runs| SK[setup_keychain.py]
+        U[User] -->|Runs| SK[bin/setup_keychain.py]
         SK -->|Encrypts & Stores Keys| SS{Secret Storage}
         subgraph Secret_Storage [Storage Backends]
             SS --> LK[Local Keyring]
@@ -18,16 +18,16 @@ graph TD
     end
 
     subgraph Interface_Layers [2. Interaction Interfaces]
-        U -->|Browses to localhost:8000| UI[AG-UI Web Console]
-        U -->|Runs Terminal Command| CLI[langchain-agent.py]
+        U -->|Browses to localhost:9595| UI[AG-UI Web Console]
+        U -->|Runs Terminal Command| CLI[bin/langchain-agent.py]
     end
 
     subgraph Core_Engine [3. Core Agent Logic]
-        UI -->|SSE / REST| AS[agui_server.py - FastAPI]
+        UI -->|SSE / REST| AS[bin/agui_server.py - FastAPI]
         CLI -->|Python Library| LC[LangChain Agent Engine]
         AS --> LC
 
-        LC -->|Retrieves Keys| LC_CONF[llm_config.py]
+        LC -->|Retrieves Keys| LC_CONF[core/llm_config.py]
         LC_CONF --> SS
         
         LC -->|Natural Language Query| LLM[LLM Provider: Gemini / OpenAI / Claude]
@@ -45,7 +45,7 @@ graph TD
     end
 
     subgraph Serverless_Deployment [5. Continuous Operations]
-        LH[lambda_handler.py] -->|Shared Logic| LC
+        LH[deployment/lambda_handler.py] -->|Shared Logic| LC
         CW[CloudWatch / EventBridge] -->|Trigger| LH
     end
 
@@ -61,10 +61,10 @@ graph TD
 
 | Component | Responsibility |
 | :--- | :--- |
-| **`setup_keychain.py`** | Securely captures LLM API keys and stores them in your preferred vault (Keyring, AWS, Azure). |
-| **`llm_config.py`** | Central engine for provider mapping and multi-source credential retrieval. |
-| **`agui_server.py`** | FastAPI backend that manages chat sessions and streams responses via Server-Sent Events (SSE). |
-| **`langchain-agent.py`** | The CLI interface that provides the exact same infrastructure logic in a terminal environment. |
+| **`bin/setup_keychain.py`** | Securely captures LLM API keys and stores them in your preferred vault (Keyring, AWS, Azure). |
+| **`core/llm_config.py`** | Central engine for provider mapping and multi-source credential retrieval. |
+| **`bin/agui_server.py`** | FastAPI backend that manages chat sessions and streams responses via Server-Sent Events (SSE). |
+| **`bin/langchain-agent.py`** | The CLI interface that provides the exact same infrastructure logic in a terminal environment. |
 | **`aws_terraform_server.py`** | The MCP server that translates LLM intents into real Terraform code and manages the deployment lifecycle. |
-| **`lambda_handler.py`** | Wraps the agent logic into a serverless function for remote triggers or API integration. |
+| **`deployment/lambda_handler.py`** | Wraps the agent logic into a serverless function for remote triggers or API integration. |
 | **`terraform_workspace/`** | The directory where the agent generates, manages, and tracks the state of your infrastructure. |

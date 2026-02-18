@@ -39,7 +39,7 @@ architecture_to_terraform(architecture)          # Generate Terraform code
 4. **POST `/api/architecture/deploy`**
    - Input: Parsed architecture dict
    - Output: Terraform plan ready for apply
-   - Does: Generate code  Create project  Init  Plan
+   - Does: Generate code -> Create project -> Init -> Plan
 
 ### 3. MCP Server Tools: `mcp_servers/aws_terraform_server.py`
 
@@ -61,22 +61,22 @@ architecture_to_terraform(architecture)          # Generate Terraform code
 
 ```
 User provides architecture
-        
+        ->
     Mermaid text OR Image file
-        
+        ->
     Parse/Analyze (extract resources)
-        
+        ->
     Converted to architecture dict
-        
+        ->
     Generate Terraform code
-        
+        ->
     Create project directory
-        
+        ->
     terraform init + terraform plan
-        
-    terraform apply (user confirms)
-        
-    Infrastructure deployed
+        ->
+    user reviews plan
+        ->
+    terraform_apply (separate step)
 ```
 
 ## Supported AWS Services
@@ -176,7 +176,7 @@ aws-infra-agent-bot/
 ├── docs/
 │   ├── ARCHITECTURE_DRIVEN_DEPLOYMENT.md  # NEW - Full guide
 │   └── ...
-├── examples_architecture_deployment.py    # NEW - Usage examples
+├── samples/architecture_deployment_examples.py    # NEW - Usage examples
 └── ...
 ```
 
@@ -227,7 +227,7 @@ To test the new functionality:
 python bin/agui_server.py
 
 # Test Mermaid parsing
-python examples_architecture_deployment.py
+python samples/architecture_deployment_examples.py
 
 # Test with actual image
 curl -F "file=@architecture.png" http://localhost:9595/api/architecture/parse-image

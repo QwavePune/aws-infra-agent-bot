@@ -51,7 +51,7 @@ The system automatically generates production-ready Terraform code and can deplo
    - Security considerations
 
 ### Examples & Tests
-7. **`examples_architecture_deployment.py`** (NEW)
+7. **`samples/architecture_deployment_examples.py`** (NEW)
    - Python examples for all workflows
    - Demonstrates Mermaid parsing
    - Shows image upload and analysis
@@ -315,7 +315,7 @@ graph LR
 4. **User reviews and deploys**
    ```
    Runs: terraform plan (user reviews)
-   Runs: terraform apply (user confirms)
+   Runs: terraform_apply as a separate step after review
    ```
 
 5. **Infrastructure is live**
@@ -373,7 +373,7 @@ This feature integrates seamlessly with:
 
 ```bash
 # Test Mermaid parsing
-python examples_architecture_deployment.py
+python samples/architecture_deployment_examples.py
 
 # Test image parsing (requires LLM credentials)
 curl -F "file=@architecture.png" http://localhost:9595/api/architecture/parse-image
@@ -398,7 +398,7 @@ For issues or questions:
 1. Check `docs/ARCHITECTURE_DRIVEN_DEPLOYMENT.md`
 2. Review [ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md](docs/ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md)
 3. Check server logs: `logs/agui_server.log`
-4. Review examples in `examples_architecture_deployment.py`
+4. Review examples in `samples/architecture_deployment_examples.py`
 
 ---
 

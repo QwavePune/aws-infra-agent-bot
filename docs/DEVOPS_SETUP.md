@@ -256,7 +256,7 @@ aws secretsmanager create-secret \
   }'
 ```
 
-Update `llm_config.py` to retrieve from Secrets Manager:
+Update `core/llm_config.py` to retrieve from Secrets Manager:
 
 ```python
 import json
@@ -300,7 +300,7 @@ docker run -it --env-file .env langchain-agent:latest
 
 ### Pipeline Failures
 
-1. **Build fails:** Check Python syntax with `python -m py_compile langchain-agent.py`
+1. **Build fails:** Check Python syntax with `python -m py_compile bin/langchain-agent.py`
 2. **Tests fail:** Run locally with `pytest tests/ -v`
 3. **Deploy fails:** Check Lambda permissions and CloudWatch logs
 4. **Docker build fails:** Verify `requirements.txt` is correct

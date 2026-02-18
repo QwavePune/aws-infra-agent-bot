@@ -1,6 +1,11 @@
 """Unit tests for capability intent detection and response rendering."""
 
-from core.capabilities import is_capabilities_request, build_capabilities_response
+from core.capabilities import (
+    is_capabilities_request,
+    build_capabilities_response,
+    is_audience_request,
+    build_audience_response,
+)
 
 
 class _MockMCP:
@@ -16,6 +21,21 @@ def test_is_capabilities_request_matches_common_phrases():
     assert is_capabilities_request("Can you share your capabilities")
     assert is_capabilities_request("How can you help with AWS?")
     assert not is_capabilities_request("Create a VPC in ap-south-1")
+
+
+def test_is_audience_request_matches_variations():
+    assert is_audience_request("Who is the audience for this agent?")
+    assert is_audience_request("Who is this agent for?")
+    assert is_audience_request("What is the intended audience?")
+    assert is_audience_request("Who should use this agent?")
+    assert not is_audience_request("Create a VPC in ap-south-1")
+
+
+def test_build_audience_response_contains_core_user_groups():
+    text = build_audience_response()
+    assert "devops" in text.lower()
+    assert "cloud engineers" in text.lower()
+    assert "terraform" in text.lower()
 
 
 def test_build_capabilities_response_includes_active_mcp_tools():

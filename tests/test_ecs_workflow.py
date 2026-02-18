@@ -30,6 +30,8 @@ def test_start_update_review_ecs_workflow(server):
     assert started["ready_to_create"] is False
     workflow_id = started["workflow_id"]
     assert "cluster_name" in started["missing_fields"]
+    assert isinstance(started.get("questions"), list)
+    assert len(started["questions"]) > 0
 
     updated = server.execute_tool(
         "update_ecs_deployment_workflow",

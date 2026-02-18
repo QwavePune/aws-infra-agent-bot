@@ -7,7 +7,6 @@ import warnings
 import os
 import logging
 import sys
-from datetime import datetime
 import tempfile
 from pathlib import Path
 
@@ -35,9 +34,16 @@ from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
-from core.capabilities import is_capabilities_request, build_capabilities_response
+from core.capabilities import (
+    is_capabilities_request,
+    build_capabilities_response,
+    is_audience_request,
+    build_audience_response,
+)
 from core.intent_policy import detect_read_only_intent, is_mutating_tool
 from core.architecture_parser import ArchitectureParser
+from core.agent_protocol import EXECUTION_SYSTEM_PROMPT, extract_tool_calls, build_followup_message
+from core.workflow_logger import setup_workflow_logger, workflow_event
 
 # Import MCP server
 try:
@@ -65,6 +71,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+workflow_logger = setup_workflow_logger(APP_ROOT, "agui")
 
 UI_DIR = os.path.join(APP_ROOT, 'ui')
 
@@ -332,13 +339,33 @@ async def run_agent(payload: RunRequest):
     run_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     thread_id = payload.threadId or str(uuid.uuid4())
+    workflow_event(
+        workflow_logger,
+        "query_received",
+        source="agui",
+        run_id=run_id,
+        thread_id=thread_id,
+        message_id=message_id,
+        provider=payload.provider,
+        model=payload.model or "default",
+        mcp_server=payload.mcpServer,
+        metadata={"class": "FastAPI", "method": "run_agent"},
+        user_query=payload.message,
+    )
     
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Message ID: {message_id}")
 
-    if is_capabilities_request(payload.message):
-        active_mcp = aws_mcp if payload.mcpServer == "aws_terraform" else None
-        response_text = build_capabilities_response(payload.mcpServer, active_mcp, payload.message)
+    if is_audience_request(payload.message):
+        response_text = build_audience_response()
+        workflow_event(
+            workflow_logger,
+            "audience_request",
+            source="agui",
+            run_id=run_id,
+            thread_id=thread_id,
+            metadata={"class": "FastAPI", "method": "run_agent"},
+        )
 
         def stream_capabilities():
             yield sse_event({
@@ -373,6 +400,74 @@ async def run_agent(payload: RunRequest):
                 "threadId": thread_id,
                 "timestamp": now_ms(),
             })
+            workflow_event(
+                workflow_logger,
+                "run_finished",
+                source="agui",
+                run_id=run_id,
+                thread_id=thread_id,
+                metadata={"class": "FastAPI", "method": "run_agent"},
+            )
+
+        return StreamingResponse(
+            stream_capabilities(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if is_capabilities_request(payload.message):
+        active_mcp = aws_mcp if payload.mcpServer == "aws_terraform" else None
+        response_text = build_capabilities_response(payload.mcpServer, active_mcp, payload.message)
+        workflow_event(
+            workflow_logger,
+            "capabilities_request",
+            source="agui",
+            run_id=run_id,
+            thread_id=thread_id,
+            metadata={"class": "FastAPI", "method": "run_agent"},
+        )
+
+        def stream_capabilities():
+            yield sse_event({
+                "type": "RUN_STARTED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_START",
+                "messageId": message_id,
+                "role": "assistant",
+                "timestamp": now_ms(),
+            })
+            chunk_size = 100
+            for idx in range(0, len(response_text), chunk_size):
+                chunk = response_text[idx: idx + chunk_size]
+                yield sse_event({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": chunk,
+                    "timestamp": now_ms(),
+                })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_END",
+                "messageId": message_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "RUN_FINISHED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+            workflow_event(
+                workflow_logger,
+                "run_finished",
+                source="agui",
+                run_id=run_id,
+                thread_id=thread_id,
+                metadata={"class": "FastAPI", "method": "run_agent"},
+            )
 
         return StreamingResponse(
             stream_capabilities(),
@@ -382,24 +477,7 @@ async def run_agent(payload: RunRequest):
 
     history = conversation_store.setdefault(thread_id, [])
     if not history:
-        system_prompt = (
-            "You are an AWS Infrastructure Execution Engine. "
-            "Your ONLY output should be a tool call when an action is required. "
-            "DO NOT explain what you are going to do. DO NOT ask for permission. DO NOT ask for tool outputs. "
-            "THE SYSTEM AUTOMATICALLY EXECUTES YOUR TOOL CALLS AND PROVIDES THE DATA. "
-            "1. For any AWS request, first CALL 'get_user_permissions' to verify identity. "
-            "2. For listing/discovering resources: CALL 'list_account_inventory' for a complete summary, or 'list_aws_resources' to list specific resource types. "
-            "3. For details about a specific resource: CALL 'describe_resource' with the resource ID or ARN. "
-            "4. If user mentions 'CLI', you MUST pass 'mode'='cli' to the creation tools. "
-            "5. To create: CALL the creation tool (e.g., 'create_s3_bucket'). "
-            "5a. For ECS deployments, prefer guided flow: start_ecs_deployment_workflow -> update_ecs_deployment_workflow -> review_ecs_deployment_workflow -> create_ecs_service. "
-            "5b. IMPORTANT: After any Terraform-based create_* tool returns a project_name, you MUST immediately call terraform_plan with that exact project_name, then terraform_apply with that exact project_name in the same run. "
-            "6. If in Terraform mode, follow the flow: create -> terraform_plan -> terraform_apply. "
-            "7. IMPORTANT: When calling 'terraform_plan' or 'terraform_apply', you MUST use the EXACT 'project_name' returned by the creation tool. "
-            "8. For read-only user intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools. "
-            "9. Only provide a text response AFTER all relevant tools have finished."
-        )
-        history.append(SystemMessage(content=system_prompt))
+        history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
         logger.info(f"[{run_id}] System prompt initialized")
     
     # Safety: Only append user message if the last message wasn't already a user message
@@ -416,6 +494,14 @@ async def run_agent(payload: RunRequest):
     def stream():
         try:
             logger.info(f"[{run_id}] Stream started for thread {thread_id}")
+            workflow_event(
+                workflow_logger,
+                "run_started",
+                source="agui",
+                run_id=run_id,
+                thread_id=thread_id,
+                metadata={"class": "FastAPI", "method": "run_agent.stream"},
+            )
             yield sse_event({
                 "type": "RUN_STARTED",
                 "runId": run_id,
@@ -448,23 +534,107 @@ async def run_agent(payload: RunRequest):
             # Tool calling loop state
             max_iterations = 5
             iteration = 0
+            forced_followup_text = ""
+            last_successful_plan_project: Optional[str] = None
             while iteration < max_iterations:
+                workflow_event(
+                    workflow_logger,
+                    "llm_invocation_started",
+                    source="agui",
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    iteration=iteration + 1,
+                    metadata={"class": "LLM", "method": "invoke"},
+                )
                 response = llm.invoke(history)
                 history.append(response)
                 
                 # If there are tool calls, execute them
-                if hasattr(response, "tool_calls") and response.tool_calls:
-                    logger.info(f"[{run_id}] LLM requested {len(response.tool_calls)} tool calls")
+                tool_calls = extract_tool_calls(response)
+                if tool_calls:
+                    # Guardrail: dedupe exact repeated tool calls in one LLM step.
+                    deduped_tool_calls = []
+                    seen_tool_calls = set()
+                    for tool_call in tool_calls:
+                        tool_name = tool_call.get("name")
+                        tool_args = tool_call.get("args", {}) or {}
+                        try:
+                            signature = (tool_name, json.dumps(tool_args, sort_keys=True, default=str))
+                        except Exception:
+                            signature = (tool_name, str(tool_args))
+                        if signature in seen_tool_calls:
+                            logger.warning(f"[{run_id}] Skipping duplicate tool call in same iteration: {tool_name} {tool_args}")
+                            continue
+                        seen_tool_calls.add(signature)
+                        deduped_tool_calls.append(tool_call)
+                    tool_calls = deduped_tool_calls
+
+                    logger.info(f"[{run_id}] LLM requested {len(tool_calls)} tool calls")
+                    workflow_event(
+                        workflow_logger,
+                        "tool_calls_requested",
+                        source="agui",
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        iteration=iteration + 1,
+                        tool_count=len(tool_calls),
+                        metadata={"class": "LLM", "method": "invoke"},
+                    )
                     
-                    for tool_call in response.tool_calls:
+                    for tool_call in tool_calls:
                         tool_name = tool_call["name"]
                         tool_args = tool_call["args"]
                         tool_call_id = tool_call["id"]
+
+                        if tool_name == "terraform_apply" and payload.mcpServer == "aws_terraform" and aws_mcp:
+                            requested_project = (tool_args or {}).get("project_name")
+
+                            def _has_tfplan(project: Optional[str]) -> bool:
+                                if not project:
+                                    return False
+                                return (aws_mcp.terraform.workspace_dir / project / "tfplan").exists()
+
+                            if requested_project and not _has_tfplan(requested_project):
+                                if last_successful_plan_project and _has_tfplan(last_successful_plan_project):
+                                    logger.warning(
+                                        f"[{run_id}] terraform_apply requested project '{requested_project}' without tfplan. "
+                                        f"Using last successfully planned project '{last_successful_plan_project}' instead."
+                                    )
+                                    tool_args = dict(tool_args)
+                                    tool_args["project_name"] = last_successful_plan_project
+                            elif not requested_project and last_successful_plan_project and _has_tfplan(last_successful_plan_project):
+                                logger.warning(
+                                    f"[{run_id}] terraform_apply missing project_name. "
+                                    f"Using last successfully planned project '{last_successful_plan_project}'."
+                                )
+                                tool_args = dict(tool_args)
+                                tool_args["project_name"] = last_successful_plan_project
                         
                         logger.info(f"[{run_id}] Executing tool: {tool_name} with args: {tool_args}")
+                        workflow_event(
+                            workflow_logger,
+                            "tool_execution_started",
+                            source="agui",
+                            run_id=run_id,
+                            thread_id=thread_id,
+                            tool_name=tool_name,
+                            tool_call_id=tool_call_id,
+                            tool_args=tool_args,
+                            metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                        )
 
                         if read_only_intent and is_mutating_tool(tool_name):
                             logger.warning(f"[{run_id}] Blocked mutating tool '{tool_name}' due to read-only user intent")
+                            workflow_event(
+                                workflow_logger,
+                                "tool_execution_blocked",
+                                source="agui",
+                                run_id=run_id,
+                                thread_id=thread_id,
+                                tool_name=tool_name,
+                                reason="read_only_intent",
+                                metadata={"class": "IntentPolicy", "method": "is_mutating_tool"},
+                            )
                             history.append(ToolMessage(
                                 content=json.dumps({
                                     "success": False,
@@ -479,6 +649,25 @@ async def run_agent(payload: RunRequest):
                             try:
                                 result = aws_mcp.execute_tool(tool_name, tool_args)
                                 logger.info(f"[{run_id}] Tool {tool_name} executed. Success: {result.get('success', False)}")
+                                if tool_name == "terraform_plan" and result.get("success"):
+                                    planned_project = (tool_args or {}).get("project_name")
+                                    if planned_project:
+                                        last_successful_plan_project = planned_project
+                                workflow_event(
+                                    workflow_logger,
+                                    "tool_execution_completed",
+                                    source="agui",
+                                    run_id=run_id,
+                                    thread_id=thread_id,
+                                    tool_name=tool_name,
+                                    tool_call_id=tool_call_id,
+                                    success=result.get("success", False),
+                                    tool_result=result,
+                                    metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                                )
+                                followup_text = build_followup_message(tool_name, result)
+                                if followup_text:
+                                    forced_followup_text = followup_text
                                 
                                 # Stream tool result to UI
                                 yield sse_event({
@@ -495,6 +684,17 @@ async def run_agent(payload: RunRequest):
                                 ))
                             except Exception as tool_err:
                                 logger.error(f"[{run_id}] Tool execution error: {tool_err}")
+                                workflow_event(
+                                    workflow_logger,
+                                    "tool_execution_failed",
+                                    source="agui",
+                                    run_id=run_id,
+                                    thread_id=thread_id,
+                                    tool_name=tool_name,
+                                    tool_call_id=tool_call_id,
+                                    error=str(tool_err),
+                                    metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                                )
                                 history.append(ToolMessage(
                                     content=json.dumps({"success": False, "error": str(tool_err)}),
                                     tool_call_id=tool_call_id
@@ -512,6 +712,8 @@ async def run_agent(payload: RunRequest):
                     break
             
             response_text = response.content if response else ""
+            if forced_followup_text:
+                response_text = forced_followup_text
             if not response_text.strip():
                 if hasattr(response, "tool_calls") and response.tool_calls:
                     response_text = "I have initiated the infrastructure changes as requested."
@@ -539,6 +741,15 @@ async def run_agent(payload: RunRequest):
             })
             
             logger.info(f"[{run_id}] Stream completed successfully")
+            workflow_event(
+                workflow_logger,
+                "run_finished",
+                source="agui",
+                run_id=run_id,
+                thread_id=thread_id,
+                response_length=len(response_text),
+                metadata={"class": "FastAPI", "method": "run_agent.stream"},
+            )
 
             yield sse_event({
                 "type": "RUN_FINISHED",
@@ -549,6 +760,15 @@ async def run_agent(payload: RunRequest):
 
         except Exception as exc:
             logger.error(f"[{run_id}] Error during stream execution: {str(exc)}", exc_info=True)
+            workflow_event(
+                workflow_logger,
+                "run_failed",
+                source="agui",
+                run_id=run_id,
+                thread_id=thread_id,
+                error=str(exc),
+                metadata={"class": "FastAPI", "method": "run_agent.stream"},
+            )
             yield sse_event({
                 "type": "RUN_ERROR",
                 "runId": run_id,

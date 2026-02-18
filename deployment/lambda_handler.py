@@ -38,7 +38,12 @@ if APP_ROOT not in sys.path:
 try:
     from core.llm_config import initialize_llm, select_llm_interactive
     from core.intent_policy import detect_read_only_intent, is_mutating_tool
-    from core.capabilities import is_capabilities_request, build_capabilities_response
+    from core.capabilities import (
+        is_capabilities_request,
+        build_capabilities_response,
+        is_audience_request,
+        build_audience_response,
+    )
 except ImportError:
     logger.error("Failed to import core.llm_config")
     raise
@@ -83,6 +88,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return {
                 'statusCode': 400,
                 'body': json.dumps({'error': 'Missing required parameter: query'})
+            }
+
+        if is_audience_request(query):
+            response_text = build_audience_response()
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'is_real_deploy': False,
+                    'tool_usage': False
+                }),
+                'response': response_text,
+                'conversation_history': conversation_history
             }
 
         if is_capabilities_request(query):

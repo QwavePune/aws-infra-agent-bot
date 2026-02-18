@@ -5,6 +5,12 @@ An advanced AI-powered agent designed to provision and manage AWS infrastructure
 ## 🌟 True Purpose
 The primary goal of this project is to empower users to build and manage complex AWS infrastructure by simply describing their requirements in plain English. The agent handles the heavy lifting of generating Terraform configurations, planning changes, and safely executing deployments.
 
+## List of typical actions this agent can perform
+[x] Who are you?
+[x] What can you do for me?
+[x] Create an EC2 instance [follow up questions to be answered]
+[x] Use this mermaid code and build the infrastructure [provide a valid mermaid diagram for AWS]
+[x] List all AWS resources in my account
 ---
 
 ## ✨ Key Features

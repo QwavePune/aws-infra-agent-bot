@@ -11,11 +11,38 @@ CAPABILITY_PHRASES = (
     "how can you help",
 )
 
+AUDIENCE_PHRASES = (
+    "who is the audience for this agent",
+    "who is this agent for",
+    "who should use this agent",
+    "who can use this agent",
+    "intended audience",
+    "target audience",
+    "who is this for",
+)
+
 
 def is_capabilities_request(message: str) -> bool:
     """Return True when the user asks for capabilities/help."""
     text = (message or "").strip().lower()
     return any(phrase in text for phrase in CAPABILITY_PHRASES)
+
+
+def is_audience_request(message: str) -> bool:
+    """Return True when the user asks about intended audience."""
+    text = (message or "").strip().lower()
+    return any(phrase in text for phrase in AUDIENCE_PHRASES)
+
+
+def build_audience_response() -> str:
+    """Build a standard response for audience/intended-user questions."""
+    return (
+        "This agent is designed for technical AWS builders and operators, especially:\n"
+        "- Platform, DevOps, and SRE teams\n"
+        "- Cloud engineers and infrastructure developers\n"
+        "- Teams that manage AWS resources using Terraform workflows\n\n"
+        "It is most useful for users who want guided infrastructure planning, validation, and execution."
+    )
 
 
 def _dedupe_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -151,13 +178,13 @@ def build_capabilities_response(mcp_server_name: Optional[str], mcp_server: Opti
                         base.append(f"- `{name}`: {desc}")
                     return "\n".join(base)
 
-            base.append("Available MCP Capabilities:")
+            base.append("Available Capabilities (MCP):")
             base.extend(_service_summary_sections(_tool_names(tools)))
             base.append("")
             base.append("For detailed tool-level output, ask: `Show <service> capabilities`.")
             return "\n".join(base)
 
-    base.append("Available MCP Capabilities:")
+    base.append("Available Capabilities (MCP):")
     base.append("- No MCP tool server is currently active.")
     base.append("- I can still answer guidance questions, but cannot execute infra actions until MCP is enabled.")
     return "\n".join(base)

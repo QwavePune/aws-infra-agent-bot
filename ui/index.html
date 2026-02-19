@@ -12,8 +12,8 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">AWS Infra Agent</span>
-        <span class="brand-sub">Operations Console</span>
+        <span id="brandMark" class="brand-mark">AWS Infra Agent</span>
+        <span id="brandSub" class="brand-sub">Operations Console</span>
       </div>
       <div class="topbar-actions">
         <button id="awsLoginBtn" class="btn-primary">CLI Login</button>
@@ -33,21 +33,22 @@
             <select id="mcpSelect">
               <option value="none">None</option>
               <option value="aws_terraform" selected>AWS Infrastructure (Terraform)</option>
+              <option value="azure_terraform">Azure Infrastructure (Terraform)</option>
             </select>
           </div>
         </section>
 
         <section class="rail-card">
-          <h3>AWS Identity</h3>
+          <h3 id="identityTitle">AWS Identity</h3>
           <div id="awsIdentity" class="identity-badge" style="display: none;">
             <span id="awsAccount">AWS: ---</span>
           </div>
-          <p class="rail-help">Use CLI Login to refresh profile credentials without leaving this console.</p>
+          <p id="identityHelp" class="rail-help">Use CLI Login to refresh profile credentials without leaving this console.</p>
         </section>
 
         <section class="rail-card">
           <h3>Quick Actions</h3>
-          <div class="chip-grid">
+          <div id="quickActions" class="chip-grid">
             <button type="button" class="prompt-chip" data-prompt="What can you do for me?">Capabilities</button>
             <button type="button" class="prompt-chip" data-prompt="List all AWS resources in my account">Inventory</button>
             <button type="button" class="prompt-chip" data-prompt="Start ECS deployment workflow in ap-south-1">Start ECS Flow</button>
@@ -67,7 +68,7 @@
         <div class="chat-stream" id="chatStream">
           <div class="message assistant">
             <div class="message-meta">Assistant</div>
-            <div class="message-body">
+            <div id="welcomeMessage" class="message-body">
               Welcome back. I can guide AWS infrastructure workflows, validate prerequisites, and execute MCP tools in real time.
             </div>
           </div>
@@ -98,8 +99,8 @@
         </section>
 
         <section class="rail-card">
-          <h3>Guided Workflow</h3>
-          <ol class="workflow-list">
+          <h3 id="workflowTitle">Guided Workflow</h3>
+          <ol id="workflowList" class="workflow-list">
             <li>Start workflow and collect requirements</li>
             <li>Validate IDs, roles, and region prerequisites</li>
             <li>Create Terraform project</li>

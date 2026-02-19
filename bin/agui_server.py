@@ -546,7 +546,26 @@ async def run_agent(payload: RunRequest):
                     iteration=iteration + 1,
                     metadata={"class": "LLM", "method": "invoke"},
                 )
-                response = llm.invoke(history)
+                try:
+                    response = llm.invoke(history)
+                except Exception as llm_err:
+                    err_text = str(llm_err)
+                    if (
+                        payload.provider == "perplexity"
+                        and payload.mcpServer != "none"
+                        and "Tool calling is not supported for this model" in err_text
+                    ):
+                        logger.warning(
+                            f"[{run_id}] Perplexity model rejected tool calling for MCP request. Falling back to guidance response."
+                        )
+                        forced_followup_text = (
+                            "Perplexity (Sonar) does not support MCP tool calling for this request. "
+                            "No AWS tools were executed. Switch to GPT-4o or Gemini and re-run the same prompt."
+                        )
+                        response = AIMessage(content="")
+                        history.append(response)
+                        break
+                    raise
                 history.append(response)
                 
                 # If there are tool calls, execute them

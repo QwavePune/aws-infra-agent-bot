@@ -36,7 +36,7 @@
    - Performance considerations
 
 ### 💻 Code Examples
-6. **[examples_architecture_deployment.py](examples_architecture_deployment.py)** - Python examples
+6. **[samples/architecture_deployment_examples.py](samples/architecture_deployment_examples.py)** - Python examples
    - Parse Mermaid diagrams
    - Parse architecture images
    - Generate Terraform
@@ -268,14 +268,14 @@ aws-infra-agent-bot/
 ├── [ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md](docs/ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md)
 ├── [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md)
 ├── [IMPLEMENTATION_CHECKLIST.md](docs/IMPLEMENTATION_CHECKLIST.md)
-└── examples_architecture_deployment.py
+└── samples/architecture_deployment_examples.py
 ```
 
 ## Getting Started Steps
 
 1. **Read** [QUICK_START_ARCHITECTURE_DEPLOYMENT.md](docs/QUICK_START_ARCHITECTURE_DEPLOYMENT.md)
 2. **Run** `python bin/agui_server.py`
-3. **Try** the examples in `examples_architecture_deployment.py`
+3. **Try** the examples in `samples/architecture_deployment_examples.py`
 4. **Upload** a diagram or image
 5. **Deploy** your infrastructure!
 
@@ -322,7 +322,7 @@ See [QUICK_START_ARCHITECTURE_DEPLOYMENT.md](docs/QUICK_START_ARCHITECTURE_DEPLO
 - **Architecture Diagrams**: [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md)
 - **Implementation Status**: [IMPLEMENTATION_CHECKLIST.md](docs/IMPLEMENTATION_CHECKLIST.md)
 - **Quick Start**: [QUICK_START_ARCHITECTURE_DEPLOYMENT.md](docs/QUICK_START_ARCHITECTURE_DEPLOYMENT.md)
-- **Code Examples**: `examples_architecture_deployment.py` and `ui/architecture-deployment.js`
+- **Code Examples**: `samples/architecture_deployment_examples.py` and `ui/architecture-deployment.js`
 
 ---
 

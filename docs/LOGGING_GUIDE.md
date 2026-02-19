@@ -2,13 +2,13 @@
 
 ## Overview
 
-The `agui_server.py` now has comprehensive logging to track all user interactions, LLM operations, and system events.
+The `bin/agui_server.py` now has comprehensive logging to track all user interactions, LLM operations, and system events.
 
 ## Log Locations
 
 ### 1. **Primary Log File** 📋
-- **File**: `agui-server.log`
-- **Location**: `/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/agui-server.log`
+- **File**: `logs/agui_server.log`
+- **Location**: `/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/logs/agui_server.log`
 - **Contains**: All application logs (startup, requests, responses, errors)
 - **Format**: `TIMESTAMP - LOGGER_NAME - LEVEL - MESSAGE`
 
@@ -18,9 +18,9 @@ The `agui_server.py` now has comprehensive logging to track all user interaction
 - **Useful for**: Live monitoring during development
 
 ### 3. **LLM Configuration Logs** 🔑
-- **File**: `.agent-session.log`
-- **Contains**: Credential retrieval and LLM initialization logs from `llm_config.py`
-- **Shared with**: `langchain-agent.py`
+- **File**: `logs/agent_session.log`
+- **Contains**: Credential retrieval and LLM initialization logs from `core/llm_config.py`
+- **Shared with**: `bin/langchain-agent.py`
 
 ## What Gets Logged
 
@@ -30,7 +30,7 @@ The `agui_server.py` now has comprehensive logging to track all user interaction
 AWS Infra Agent Bot - AG-UI Server Starting
 UI Directory: /Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/ui
 ================================================================================
-Starting uvicorn server on http://0.0.0.0:8000
+Starting uvicorn server on http://0.0.0.0:9595
 Reload mode: enabled
 ```
 
@@ -84,40 +84,40 @@ Request rejected: Unsupported provider 'invalid-provider'
 ### Real-time Monitoring
 ```bash
 # Watch the log file in real-time
-tail -f agui-server.log
+tail -f logs/agui_server.log
 
 # Watch with color highlighting (if you have ccze installed)
-tail -f agui-server.log | ccze -A
+tail -f logs/agui_server.log | ccze -A
 
 # Watch last 50 lines and follow
-tail -50f agui-server.log
+tail -50f logs/agui_server.log
 ```
 
 ### Search Logs
 ```bash
 # Find all errors
-grep "ERROR" agui-server.log
+grep "ERROR" logs/agui_server.log
 
 # Find logs for a specific run
-grep "run-id-here" agui-server.log
+grep "run-id-here" logs/agui_server.log
 
 # Find all user queries
-grep "POST /api/run" agui-server.log
+grep "POST /api/run" logs/agui_server.log
 
 # Count requests by type
-grep "API Request:" agui-server.log | cut -d'-' -f3 | sort | uniq -c
+grep "API Request:" logs/agui_server.log | cut -d'-' -f3 | sort | uniq -c
 ```
 
 ### View Recent Activity
 ```bash
 # Last 20 lines
-tail -20 agui-server.log
+tail -20 logs/agui_server.log
 
 # Last 100 lines
-tail -100 agui-server.log
+tail -100 logs/agui_server.log
 
 # View with timestamps for today
-grep "2026-02-08" agui-server.log
+grep "2026-02-08" logs/agui_server.log
 ```
 
 ## Log Levels
@@ -137,7 +137,7 @@ For production, consider implementing log rotation to prevent the log file from 
 # Using logrotate (Linux/macOS)
 # Create /etc/logrotate.d/agui-server
 
-/path/to/agui-server.log {
+/path/to/logs/agui_server.log {
     daily
     rotate 7
     compress
@@ -147,13 +147,13 @@ For production, consider implementing log rotation to prevent the log file from 
 }
 ```
 
-Or modify the logging configuration in `agui_server.py` to use `RotatingFileHandler`:
+Or modify the logging configuration in `bin/agui_server.py` to use `RotatingFileHandler`:
 
 ```python
 from logging.handlers import RotatingFileHandler
 
 handler = RotatingFileHandler(
-    'agui-server.log',
+    'logs/agui_server.log',
     maxBytes=10*1024*1024,  # 10MB
     backupCount=5
 )
@@ -216,11 +216,11 @@ This is intentional for privacy and security. If you need to log query/response 
 
 | Command | Purpose |
 |---------|---------|
-| `tail -f agui-server.log` | Watch logs in real-time |
-| `grep ERROR agui-server.log` | Find all errors |
-| `grep "run-id" agui-server.log` | Track specific request |
-| `tail -100 agui-server.log` | View last 100 lines |
-| `wc -l agui-server.log` | Count total log lines |
+| `tail -f logs/agui_server.log` | Watch logs in real-time |
+| `grep ERROR logs/agui_server.log` | Find all errors |
+| `grep "run-id" logs/agui_server.log` | Track specific request |
+| `tail -100 logs/agui_server.log` | View last 100 lines |
+| `wc -l logs/agui_server.log` | Count total log lines |
 
 ---
 

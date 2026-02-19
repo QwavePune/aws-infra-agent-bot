@@ -5,7 +5,7 @@ This project now includes a Model Context Protocol (MCP) server for AWS Infrastr
 ## Features
 - **Natural Language Infrastructure**: "Deploy a production-grade VPC and an RDS database."
 - **RBAC Integration**: Automatically checks your AWS IAM permissions using the IAM Policy Simulator.
-- **Flexible Provisioning Modes**: Choose between **Terraform** (for state-managed, production-ready IaC) or **AWS CLI** (for quick, direct resource creation).
+- **Terraform-First Provisioning**: Infrastructure creation is Terraform-only, with guided `create_* -> terraform_plan -> terraform_apply` workflows.
 - **Production-Grade Templates**: 
   - **Multi-AZ VPC**: Optimized network layout with public/private subnets.
   - **RDS PostgreSQL**: Managed database provisioning with security defaults (Terraform only).
@@ -18,8 +18,8 @@ This project now includes a Model Context Protocol (MCP) server for AWS Infrastr
 3. **IAM Permissions**: The user must have sufficient permissions to simulate policies and manage resources.
 
 ## Usage
-1. Start the server: `python3 agui_server.py`
-2. Open the UI: [http://localhost:8000](http://localhost:8000)
+1. Start the server: `python3 bin/agui_server.py`
+2. Open the UI: [http://localhost:9595](http://localhost:9595)
 3. Select **"AWS Infrastructure (Terraform)"** from the MCP Server dropdown in the header.
 4. Select your preferred LLM (e.g., OpenAI or Claude).
 5. Ask the agent to build something:
@@ -38,11 +38,11 @@ This project now includes a Model Context Protocol (MCP) server for AWS Infrastr
 4. **Conversational Feedback**: The LLM confirms the operation and provides details (like public IPs or bucket names).
 
 ## Security & RBAC
-- **Credential Source**: Uses the project's centralized `llm_config.py` logic to source AWS credentials.
+- **Credential Source**: Uses the project's centralized `core/llm_config.py` logic to source AWS credentials.
 - **Simulation First**: Before running Terraform, the MCP server calls `iam:SimulatePrincipalPolicy` to ensure the user is authorized.
 - **Safe State**: Terraform state and project files are managed in `./terraform_workspace/`.
 
 ## Troubleshooting
 - **"Terraform not found"**: Ensure the `terraform` binary is installed (`brew install terraform` on macOS).
 - **"Unauthorized"**: Check your AWS credentials and ensure you have permissions to the resources you are trying to create.
-- **Logs**: Monitor `agui-server.log` for detailed execution logs of both the LLM and the Terraform commands.
+- **Logs**: Monitor `logs/agui_server.log` for detailed execution logs of both the LLM and the Terraform commands.

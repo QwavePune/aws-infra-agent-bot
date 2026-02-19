@@ -114,8 +114,14 @@ const loadModels = async () => {
       });
     });
 
-    const defaultOption = [...modelSelect.options].find((opt) => opt.dataset.default === "true");
-    if (defaultOption) {
+    const options = [...modelSelect.options];
+    const preferredOpenAI =
+      options.find((opt) => opt.value === "openai::gpt-4o-mini") ||
+      options.find((opt) => opt.value.startsWith("openai::"));
+    const defaultOption = options.find((opt) => opt.dataset.default === "true");
+    if (preferredOpenAI) {
+      modelSelect.value = preferredOpenAI.value;
+    } else if (defaultOption) {
       modelSelect.value = defaultOption.value;
     }
 
@@ -320,60 +326,70 @@ const sendMessage = async (message) => {
   setStatus("Running");
   sendBtn.disabled = true;
   const startedAt = Date.now();
+  try {
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  const response = await fetch("/api/run", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    addMessage("assistant", "Error: unable to reach agent server.");
-    setStatus("Error");
-    sendBtn.disabled = false;
-    return;
-  }
-
-  await parseSse(response, (event) => {
-    if (event.type === "RUN_STARTED") {
-      pendingStart = Date.now();
+    if (!response.ok) {
+      addMessage("assistant", "Error: unable to reach agent server.");
+      setStatus("Error");
+      return;
     }
-    if (event.type === "TEXT_MESSAGE_START") {
-      currentAssistantBubble = addMessage("assistant", "");
-    }
-    if (event.type === "TEXT_MESSAGE_CONTENT") {
-      if (!currentAssistantBubble) {
+
+    await parseSse(response, (event) => {
+      if (event.type === "RUN_STARTED") {
+        pendingStart = Date.now();
+      }
+      if (event.type === "TEXT_MESSAGE_START") {
         currentAssistantBubble = addMessage("assistant", "");
       }
-      currentAssistantBubble.textContent += event.delta || "";
-      chatStream.scrollTop = chatStream.scrollHeight;
-    }
-    if (event.type === "TEXT_MESSAGE_END") {
-      currentAssistantBubble = null;
-    }
-    if (event.type === "TOOL_RESULT") {
-      const toolBubble = addMessage("assistant", "");
-      const toolName = escapeHtml(String(event.toolName || "unknown_tool"));
-      const rendered = formatToolResult(event.result);
-      toolBubble.innerHTML = `<strong>Tool: ${toolName}</strong>`;
-      const pre = document.createElement("pre");
-      pre.className = "tool-result";
-      pre.textContent = rendered;
-      toolBubble.appendChild(pre);
-      chatStream.scrollTop = chatStream.scrollHeight;
-    }
-    if (event.type === "RUN_ERROR") {
-      addMessage("assistant", event.message || "Agent error");
-    }
-    if (event.type === "RUN_FINISHED") {
-      updateLatency(startedAt);
-      setStatus("Idle");
+      if (event.type === "TEXT_MESSAGE_CONTENT") {
+        if (!currentAssistantBubble) {
+          currentAssistantBubble = addMessage("assistant", "");
+        }
+        currentAssistantBubble.textContent += event.delta || "";
+        chatStream.scrollTop = chatStream.scrollHeight;
+      }
+      if (event.type === "TEXT_MESSAGE_END") {
+        currentAssistantBubble = null;
+      }
+      if (event.type === "TOOL_RESULT") {
+        const toolBubble = addMessage("assistant", "");
+        const toolName = escapeHtml(String(event.toolName || "unknown_tool"));
+        const rendered = formatToolResult(event.result);
+        toolBubble.innerHTML = `<strong>Tool: ${toolName}</strong>`;
+        const pre = document.createElement("pre");
+        pre.className = "tool-result";
+        pre.textContent = rendered;
+        toolBubble.appendChild(pre);
+        chatStream.scrollTop = chatStream.scrollHeight;
+      }
+      if (event.type === "RUN_ERROR") {
+        addMessage("assistant", event.message || "Agent error");
+        setStatus("Error");
+        sendBtn.disabled = false;
+      }
+      if (event.type === "RUN_FINISHED") {
+        updateLatency(startedAt);
+        setStatus("Idle");
+        sendBtn.disabled = false;
+      }
+    });
+  } catch (error) {
+    console.error("Failed to send message", error);
+    addMessage("assistant", "Error: failed while streaming agent response.");
+    setStatus("Error");
+  } finally {
+    if (sendBtn.disabled) {
       sendBtn.disabled = false;
     }
-  });
+  }
 };
 
 composer.addEventListener("submit", (event) => {

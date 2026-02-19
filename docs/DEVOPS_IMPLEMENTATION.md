@@ -22,7 +22,7 @@ Multi-stage Docker build:
 - Health check configured
 - Supports both standalone and Lambda deployment
 
-### 4. **AWS Lambda Support** (`lambda_handler.py`)
+### 4. **AWS Lambda Support** (`deployment/lambda_handler.py`)
 Converts interactive CLI agent into serverless function:
 - Synchronous query handling with conversation history
 - Integration with credential sources (AWS Secrets Manager preferred)
@@ -86,7 +86,7 @@ GitHub Actions tab → Select workflow → View logs
 | `.github/workflows/ci-cd.yml` | Main pipeline definition |
 | `tests/` | Unit and integration tests |
 | `Dockerfile` | Container image definition |
-| `lambda_handler.py` | AWS Lambda entrypoint |
+| `deployment/lambda_handler.py` | AWS Lambda entrypoint |
 | `ecs-task-definition.json` | ECS deployment config |
 | `DEVOPS_SETUP.md` | Complete setup guide |
 
@@ -149,7 +149,7 @@ GitHub Actions tab → Select workflow → View logs
 ## Troubleshooting Tips
 
 **Pipeline fails on build?**
-- Check Python syntax: `python -m py_compile langchain-agent.py`
+- Check Python syntax: `python -m py_compile bin/langchain-agent.py`
 - Verify requirements.txt: `pip install -r requirements.txt`
 
 **Tests fail locally?**

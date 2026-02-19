@@ -50,7 +50,7 @@
 - [x] [ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md](docs/ARCHITECTURE_DEPLOYMENT_IMPLEMENTATION.md) - Technical details
 
 ### Examples
-- [x] `examples_architecture_deployment.py` - Python examples
+- [x] `samples/architecture_deployment_examples.py` - Python examples
 - [x] Mermaid examples in documentation
 - [x] HTML/JavaScript examples in frontend file
 - [x] API call examples in guides

@@ -12,6 +12,9 @@ READONLY_KEYWORDS = (
     "inventory",
     "describe",
     "what resources",
+    "cost",
+    "billing",
+    "spend",
 )
 
 MUTATING_KEYWORDS = (
@@ -42,4 +45,3 @@ def detect_read_only_intent(message: str, readonly_keywords: Iterable[str] = REA
 def is_mutating_tool(tool_name: str) -> bool:
     """Return True for tools that can mutate infrastructure state."""
     return (tool_name or "").startswith("create_") or tool_name in MUTATING_TOOLS
-

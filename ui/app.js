@@ -8,6 +8,10 @@ const mcpSelect = document.getElementById("mcpSelect");
 const providerLabel = document.getElementById("providerLabel");
 const latencyLabel = document.getElementById("latencyLabel");
 const capabilitiesContent = document.getElementById("capabilitiesContent");
+const consoleView = document.getElementById("consoleView");
+const auditView = document.getElementById("auditView");
+const navAuditBtn = document.getElementById("navAuditBtn");
+const navConsoleBtn = document.getElementById("navConsoleBtn");
 
 const brandMark = document.getElementById("brandMark");
 const brandSub = document.getElementById("brandSub");
@@ -21,6 +25,7 @@ const welcomeMessage = document.getElementById("welcomeMessage");
 let threadId = crypto.randomUUID();
 let currentAssistantBubble = null;
 let pendingStart = null;
+let currentView = "console";
 
 const MODEL_SEPARATOR = "::";
 const CLOUD_AWS = "aws";
@@ -113,6 +118,36 @@ const CLOUD_CONTEXT = {
 
 const setStatus = (value) => {
   statusMeta.textContent = value;
+};
+
+const setView = (view, updateHash = true) => {
+  currentView = view === "audit" ? "audit" : "console";
+
+  if (consoleView && auditView) {
+    consoleView.classList.toggle("hidden-view", currentView !== "console");
+    auditView.classList.toggle("hidden-view", currentView !== "audit");
+  }
+
+  if (navAuditBtn) navAuditBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+  if (navConsoleBtn) navConsoleBtn.style.display = currentView === "audit" ? "inline-flex" : "none";
+  if (awsLoginBtn) awsLoginBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+  if (awsConsoleBtn) awsConsoleBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+
+  if (brandMark && brandSub) {
+    if (currentView === "audit") {
+      brandMark.textContent = "Audit Trail";
+      brandSub.textContent = "Operations Audit";
+    } else {
+      applyCloudContext();
+    }
+  }
+
+  if (updateHash) {
+    const nextHash = currentView === "audit" ? "#audit" : "#console";
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  }
 };
 
 const escapeHtml = (value) =>
@@ -699,8 +734,36 @@ mcpSelect.addEventListener("change", () => {
   loadCapabilities();
 });
 
+if (navAuditBtn) {
+  navAuditBtn.addEventListener("click", () => setView("audit"));
+}
+
+if (navConsoleBtn) {
+  navConsoleBtn.addEventListener("click", () => setView("console"));
+}
+
+document.querySelectorAll('[data-nav="audit"]').forEach((el) => {
+  el.addEventListener("click", (event) => {
+    event.preventDefault();
+    setView("audit");
+  });
+});
+
+window.addEventListener("hashchange", () => {
+  if (window.location.hash === "#audit") {
+    setView("audit", false);
+  } else {
+    setView("console", false);
+  }
+});
+
 setInterval(refreshAwsIdentity, 30000);
 
 loadModels();
 applyCloudContext();
 loadCapabilities();
+if (window.location.hash === "#audit") {
+  setView("audit", false);
+} else {
+  setView("console", false);
+}

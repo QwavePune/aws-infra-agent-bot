@@ -2,7 +2,10 @@ import json
 import time
 import uuid
 import subprocess
-from typing import Dict, List, Optional, Any
+import csv
+import io
+import glob
+from typing import Dict, List, Optional, Any, Iterable, Tuple
 import warnings
 import os
 import logging
@@ -87,6 +90,7 @@ logger = logging.getLogger(__name__)
 workflow_logger = setup_workflow_logger(APP_ROOT, "agui")
 
 UI_DIR = os.path.join(APP_ROOT, 'ui')
+WORKFLOW_LOG_DIR = os.path.join(APP_ROOT, "logs", "workflow_execution_log")
 
 app = FastAPI(title="AWS Infra Agent Bot - AG-UI")
 app.mount("/static", StaticFiles(directory=UI_DIR), name="static")
@@ -98,6 +102,181 @@ logger.info("=" * 80)
 
 conversation_store: Dict[str, List] = {}
 llm_cache: Dict[str, object] = {}
+
+
+def _audit_is_mutating_tool(tool_name: str) -> bool:
+    """Audit-local mutating classification for tool names."""
+    if is_mutating_tool(tool_name):
+        return True
+    return tool_name in {
+        "create_ecs_service",
+        "start_ecs_deployment_workflow",
+        "update_ecs_deployment_workflow",
+        "review_ecs_deployment_workflow",
+        "deploy_architecture",
+    }
+
+
+def _iter_audit_events(channel: str = "agui") -> Iterable[Dict[str, Any]]:
+    """Yield workflow events from rotated JSONL files in chronological file order."""
+    base = os.path.join(WORKFLOW_LOG_DIR, f"workflow_execution_log_{channel}.jsonl")
+    paths = sorted(glob.glob(f"{base}*"))
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        yield record
+        except FileNotFoundError:
+            continue
+
+
+def _audit_cloud_for_tool(tool_name: str) -> str:
+    lower = (tool_name or "").lower()
+    if "azure" in lower:
+        return "azure"
+    return "aws"
+
+
+def _audit_extract_resource(tool_name: str, tool_args: Dict[str, Any], tool_result: Dict[str, Any]) -> str:
+    """Best-effort resource label from tool args/result."""
+    if tool_args:
+        for key in ("bucket_name", "db_name", "function_name", "project_name", "workflow_id", "resource_id", "cluster_name", "service_name"):
+            value = tool_args.get(key)
+            if value:
+                return str(value)
+    if tool_result:
+        for key in ("project_name", "resource_id", "workflow_id"):
+            value = tool_result.get(key)
+            if value:
+                return str(value)
+    return "n/a"
+
+
+def _audit_extract_details(tool_result: Dict[str, Any]) -> str:
+    if not isinstance(tool_result, dict):
+        return str(tool_result)[:240]
+    if tool_result.get("error"):
+        return str(tool_result.get("error"))[:240]
+    if tool_result.get("message"):
+        return str(tool_result.get("message"))[:240]
+    for key in ("stdout", "details"):
+        value = tool_result.get(key)
+        if value:
+            return str(value).replace("\n", " ")[:240]
+    return "tool executed"
+
+
+def _collect_audit_entries(
+    cloud: Optional[str] = None,
+    status: Optional[str] = None,
+    action: Optional[str] = None,
+    user: Optional[str] = None,
+    limit: int = 500,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
+    started_by_call: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    actor_by_run: Dict[str, str] = {}
+    entries: List[Dict[str, Any]] = []
+
+    for record in _iter_audit_events(channel="agui"):
+        event_type = record.get("event_type")
+        run_id = record.get("run_id", "")
+        tool_name = record.get("tool_name", "")
+        tool_call_id = record.get("tool_call_id", "")
+        key = (run_id, tool_call_id)
+
+        if event_type == "tool_execution_started":
+            started_by_call[key] = record.get("tool_args", {}) or {}
+            continue
+
+        if event_type == "tool_execution_completed":
+            result = record.get("tool_result", {}) or {}
+            if tool_name == "get_user_permissions" and result.get("success"):
+                actor = (result.get("user_info", {}) or {}).get("user_arn") or (result.get("user_info", {}) or {}).get("account_id")
+                if actor:
+                    actor_by_run[run_id] = str(actor)
+
+            if not _audit_is_mutating_tool(tool_name):
+                continue
+
+            entry_status = "success" if record.get("success", False) else "failed"
+            tool_args = started_by_call.get(key, {})
+            cloud_name = _audit_cloud_for_tool(tool_name)
+            actor = actor_by_run.get(run_id, "unknown")
+            entry = {
+                "timestamp": record.get("timestamp"),
+                "run_id": run_id,
+                "thread_id": record.get("thread_id"),
+                "user": actor,
+                "cloud": cloud_name,
+                "action": tool_name,
+                "resource": _audit_extract_resource(tool_name, tool_args, result),
+                "status": entry_status,
+                "details": _audit_extract_details(result),
+                "tool_args": tool_args,
+            }
+            entries.append(entry)
+            continue
+
+        if event_type in {"tool_execution_failed", "tool_execution_blocked"} and _audit_is_mutating_tool(tool_name):
+            tool_args = started_by_call.get(key, {})
+            cloud_name = _audit_cloud_for_tool(tool_name)
+            actor = actor_by_run.get(run_id, "unknown")
+            failed_status = "blocked" if event_type == "tool_execution_blocked" else "failed"
+            details = record.get("reason") or record.get("error") or event_type
+            entries.append({
+                "timestamp": record.get("timestamp"),
+                "run_id": run_id,
+                "thread_id": record.get("thread_id"),
+                "user": actor,
+                "cloud": cloud_name,
+                "action": tool_name,
+                "resource": _audit_extract_resource(tool_name, tool_args, {}),
+                "status": failed_status,
+                "details": str(details)[:240],
+                "tool_args": tool_args,
+            })
+
+    entries.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    def _match(v: Optional[str], expected: Optional[str]) -> bool:
+        if not expected:
+            return True
+        return str(v or "").lower() == expected.lower()
+
+    filtered = [
+        entry for entry in entries
+        if _match(entry.get("cloud"), cloud)
+        and _match(entry.get("status"), status)
+        and _match(entry.get("action"), action)
+        and _match(entry.get("user"), user)
+    ]
+
+    if limit > 0:
+        filtered = filtered[:limit]
+
+    summary = {
+        "total": len(filtered),
+        "successful": sum(1 for e in filtered if e.get("status") == "success"),
+        "failed": sum(1 for e in filtered if e.get("status") == "failed"),
+        "blocked": sum(1 for e in filtered if e.get("status") == "blocked"),
+    }
+
+    filters = {
+        "clouds": sorted({e.get("cloud") for e in entries if e.get("cloud")}),
+        "statuses": sorted({e.get("status") for e in entries if e.get("status")}),
+        "actions": sorted({e.get("action") for e in entries if e.get("action")}),
+        "users": sorted({e.get("user") for e in entries if e.get("user")}),
+    }
+
+    return filtered, summary, filters
 
 
 def get_mcp_server(server_name: Optional[str]):
@@ -123,6 +302,12 @@ async def index():
     return FileResponse(f"{UI_DIR}/index.html")
 
 
+@app.get("/audit")
+async def audit_page():
+    logger.debug("Serving audit.html")
+    return FileResponse(f"{UI_DIR}/audit.html")
+
+
 @app.get("/api/models")
 async def list_models():
     logger.info("API Request: GET /api/models - Listing available LLM providers")
@@ -138,6 +323,76 @@ async def list_models():
         )
     logger.info(f"Returning {len(providers)} LLM providers")
     return JSONResponse({"providers": providers})
+
+
+@app.get("/api/audit/logs")
+async def list_audit_logs(
+    cloud: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    action: Optional[str] = Query(default=None),
+    user: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    logger.info("API Request: GET /api/audit/logs")
+    entries, summary, filters = _collect_audit_entries(
+        cloud=cloud,
+        status=status,
+        action=action,
+        user=user,
+        limit=limit,
+    )
+    return JSONResponse({
+        "summary": summary,
+        "entries": entries,
+        "filters": filters,
+        "applied": {
+            "cloud": cloud,
+            "status": status,
+            "action": action,
+            "user": user,
+            "limit": limit,
+        },
+    })
+
+
+@app.get("/api/audit/export")
+async def export_audit_logs(
+    cloud: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    action: Optional[str] = Query(default=None),
+    user: Optional[str] = Query(default=None),
+):
+    logger.info("API Request: GET /api/audit/export")
+    entries, _summary, _filters = _collect_audit_entries(
+        cloud=cloud,
+        status=status,
+        action=action,
+        user=user,
+        limit=2000,
+    )
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=["timestamp", "user", "cloud", "action", "resource", "status", "details", "run_id", "thread_id"],
+    )
+    writer.writeheader()
+    for entry in entries:
+        writer.writerow({
+            "timestamp": entry.get("timestamp", ""),
+            "user": entry.get("user", ""),
+            "cloud": entry.get("cloud", ""),
+            "action": entry.get("action", ""),
+            "resource": entry.get("resource", ""),
+            "status": entry.get("status", ""),
+            "details": entry.get("details", ""),
+            "run_id": entry.get("run_id", ""),
+            "thread_id": entry.get("thread_id", ""),
+        })
+
+    filename = f"audit-log-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv", headers=headers)
 
 
 @app.get("/api/mcp/status")

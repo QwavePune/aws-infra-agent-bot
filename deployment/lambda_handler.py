@@ -132,9 +132,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "You MUST use tools for any AWS operations. "
             f"Deployment Integrity: {'REAL_MODE' if is_real_deploy else 'DRY_RUN_MODE'}. "
             "If in 'DRY_RUN_MODE', inform the user that infrastructure will not be actually deployed. "
+            "For AWS cost or billing questions, call get_cost_explorer_summary. "
             "For ECS deployments, use guided tool chain start_ecs_deployment_workflow -> update_ecs_deployment_workflow -> review_ecs_deployment_workflow -> create_ecs_service. "
             "After any Terraform-based create_* tool returns project_name, immediately call terraform_plan and terraform_apply with that exact project_name. "
-            "For read-only intents (list, summarize, describe, inventory), NEVER call creation/deployment/destruction tools."
+            "For read-only intents (list, summarize, describe, inventory, cost, billing), NEVER call creation/deployment/destruction tools."
         )
         
         messages = [HumanMessage(content=system_prompt if not conversation_history else "")]
@@ -170,7 +171,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     if read_only_intent and tool_is_mutating:
                         result = {
                             "success": False,
-                            "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource."
+                            "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, describe_resource, or get_cost_explorer_summary."
                         }
                     elif tool_name == "terraform_apply" and not is_real_deploy:
                         result = {"success": False, "error": "DRY_RUN_MODE: Actual deployment blocked. Please set DEPLOY_REAL_INFRA=true to proceed."}

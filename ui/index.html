@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AWS Infra Agent Bot - AG-UI Console</title>
   <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/audit.css" />
 </head>
 
 <body>
@@ -16,12 +17,14 @@
         <span id="brandSub" class="brand-sub">Operations Console</span>
       </div>
       <div class="topbar-actions">
+        <button id="navConsoleBtn" class="btn-secondary" style="display: none;">Console</button>
+        <button id="navAuditBtn" class="btn-secondary">Audit Trail</button>
         <button id="awsLoginBtn" class="btn-primary">CLI Login</button>
         <button id="awsConsoleBtn" class="btn-secondary">AWS Console</button>
       </div>
     </header>
 
-    <main class="layout">
+    <main id="consoleView" class="layout">
       <aside class="left-rail">
         <section class="rail-card">
           <h3>Runtime</h3>
@@ -56,6 +59,12 @@
             <button type="button" class="prompt-chip" data-prompt="Run terraform_plan for my last project">Terraform Plan</button>
             <button type="button" class="prompt-chip" data-prompt="Show my current AWS identity and permissions">Who Am I</button>
           </div>
+        </section>
+
+        <section class="rail-card rail-audit-card">
+          <h3>Audit Trail</h3>
+          <p class="rail-help">Review change history with filters for action, status, actor, and export logs.</p>
+          <button type="button" class="btn-primary rail-audit-link" data-nav="audit">Open Audit Trail</button>
         </section>
       </aside>
 
@@ -116,9 +125,98 @@
         </section>
       </aside>
     </main>
+
+    <main id="auditView" class="audit-layout hidden-view">
+      <section class="audit-summary-grid">
+        <article class="stat-card audit-card">
+          <div class="stat-label">Total Actions</div>
+          <div id="totalActions" class="audit-metric">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Successful</div>
+          <div id="successfulActions" class="audit-metric audit-ok">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Failed</div>
+          <div id="failedActions" class="audit-metric audit-fail">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Blocked</div>
+          <div id="blockedActions" class="audit-metric audit-warn">0</div>
+        </article>
+      </section>
+
+      <section class="rail-card audit-filter-card">
+        <div class="audit-filter-header">
+          <h3>Filters</h3>
+          <button id="clearFiltersBtn" class="btn-secondary">Clear Filters</button>
+        </div>
+        <div class="audit-filters">
+          <label>
+            Cloud Provider
+            <select id="cloudFilter">
+              <option value="">All Providers</option>
+            </select>
+          </label>
+          <label>
+            Status
+            <select id="statusFilter">
+              <option value="">All Statuses</option>
+            </select>
+          </label>
+          <label>
+            Action
+            <select id="actionFilter">
+              <option value="">All Actions</option>
+            </select>
+          </label>
+          <label>
+            User
+            <select id="userFilter">
+              <option value="">All Users</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="rail-card audit-table-card">
+        <div class="audit-table-header">
+          <h3>Audit Entries</h3>
+          <span id="entryCount" class="audit-count">Showing 0 entries</span>
+        </div>
+        <div class="audit-table-wrap">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>User</th>
+                <th>Cloud</th>
+                <th>Action</th>
+                <th>Resource</th>
+                <th>Status</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="auditTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="rail-card audit-note">
+        <h3>Compliance Notice</h3>
+        <p>
+          Workflow audit events are retained with daily rotation (up to 30 files). Export logs for compliance reporting and long-term archival where needed.
+        </p>
+      </section>
+
+      <div class="topbar-actions">
+        <button id="exportBtn" class="btn-primary">Export Audit Log</button>
+      </div>
+    </main>
   </div>
 
   <script src="/static/app.js"></script>
+  <script src="/static/audit.js"></script>
 </body>
 
 </html>

@@ -584,7 +584,7 @@ while True:
                                 content=json.dumps(
                                     {
                                         "success": False,
-                                        "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource.",
+                                        "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, describe_resource, or get_cost_explorer_summary.",
                                     }
                                 ),
                                 tool_call_id=tool_call_id,

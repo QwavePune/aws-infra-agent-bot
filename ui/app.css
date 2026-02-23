@@ -44,6 +44,10 @@ body {
   flex-direction: column;
 }
 
+.hidden-view {
+  display: none !important;
+}
+
 .topbar {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -431,6 +435,12 @@ body {
   transition: transform 0.2s ease, opacity 0.2s ease;
 }
 
+.topbar-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .btn-primary {
   background: var(--brand);
 }
@@ -443,6 +453,18 @@ body {
 .btn-secondary:hover {
   transform: translateY(-1px);
   opacity: 0.95;
+}
+
+.rail-audit-card .rail-help {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.rail-audit-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 @media (max-width: 1320px) {

@@ -5,24 +5,149 @@ const sendBtn = document.getElementById("sendBtn");
 const statusMeta = document.getElementById("statusMeta");
 const modelSelect = document.getElementById("modelSelect");
 const mcpSelect = document.getElementById("mcpSelect");
-const threadIdLabel = document.getElementById("threadId");
 const providerLabel = document.getElementById("providerLabel");
 const latencyLabel = document.getElementById("latencyLabel");
-const promptChips = document.querySelectorAll(".prompt-chip");
 const capabilitiesContent = document.getElementById("capabilitiesContent");
+const consoleView = document.getElementById("consoleView");
+const auditView = document.getElementById("auditView");
+const navAuditBtn = document.getElementById("navAuditBtn");
+const navConsoleBtn = document.getElementById("navConsoleBtn");
+
+const brandMark = document.getElementById("brandMark");
+const brandSub = document.getElementById("brandSub");
+const identityTitle = document.getElementById("identityTitle");
+const identityHelp = document.getElementById("identityHelp");
+const workflowTitle = document.getElementById("workflowTitle");
+const workflowList = document.getElementById("workflowList");
+const quickActions = document.getElementById("quickActions");
+const welcomeMessage = document.getElementById("welcomeMessage");
 
 let threadId = crypto.randomUUID();
 let currentAssistantBubble = null;
 let pendingStart = null;
-
-if (threadIdLabel) {
-  threadIdLabel.textContent = threadId;
-}
+let currentView = "console";
 
 const MODEL_SEPARATOR = "::";
+const CLOUD_AWS = "aws";
+const CLOUD_AZURE = "azure";
+const CLOUD_GENERIC = "generic";
+
+const CLOUD_CONTEXT = {
+  [CLOUD_AWS]: {
+    brandMark: "AWS Infra Agent",
+    brandSub: "Operations Console",
+    loginLabel: "CLI Login",
+    consoleLabel: "AWS Console",
+    consoleUrl: "https://console.aws.amazon.com",
+    identityTitle: "AWS Identity",
+    identityHelp: "Use CLI Login to refresh profile credentials without leaving this console.",
+    identityPrefix: "AWS",
+    welcome:
+      "Welcome back. I can guide AWS infrastructure workflows, validate prerequisites, and execute MCP tools in real time.",
+    placeholder: "Ask for inventory, deployment, or guided ECS flow...",
+    workflowTitle: "Guided Workflow",
+    workflowSteps: [
+      "Start workflow and collect requirements",
+      "Validate IDs, roles, and region prerequisites",
+      "Create Terraform project",
+      "Run plan then apply",
+    ],
+    quickActions: [
+      { label: "Capabilities", prompt: "What can you do for me?" },
+      { label: "Inventory", prompt: "List all AWS resources in my account" },
+      { label: "Start ECS Flow", prompt: "Start ECS deployment workflow in ap-south-1" },
+      { label: "Review ECS", prompt: "Review my current ECS deployment workflow" },
+      { label: "Terraform Plan", prompt: "Run terraform_plan for my last project" },
+      { label: "Who Am I", prompt: "Show my current AWS identity and permissions" },
+    ],
+  },
+  [CLOUD_AZURE]: {
+    brandMark: "Azure Infra Agent",
+    brandSub: "Operations Console",
+    loginLabel: "Login N/A",
+    consoleLabel: "Azure Portal",
+    consoleUrl: "https://portal.azure.com",
+    identityTitle: "Azure Identity",
+    identityHelp: "Azure auth wiring is under construction in this build. You can still inspect available Azure tools and dummy terraform plan output.",
+    identityPrefix: "Azure",
+    welcome:
+      "Welcome back. I can show Azure infrastructure capabilities and provide a dummy Terraform plan preview while full Azure execution is under construction.",
+    placeholder: "Ask for Azure resource options, capabilities, or Terraform plan preview...",
+    workflowTitle: "Azure Workflow",
+    workflowSteps: [
+      "Capture Azure infrastructure requirements",
+      "Generate Terraform skeleton for Azure resources",
+      "Preview terraform_plan output",
+      "Use under-construction response for apply/build",
+    ],
+    quickActions: [
+      { label: "Capabilities", prompt: "What can you do for me?" },
+      { label: "Azure Resources", prompt: "List all Azure resources available for build" },
+      { label: "Terraform Plan", prompt: "Run terraform_plan for azure-demo" },
+      { label: "Terraform Apply", prompt: "Run terraform_apply for azure-demo" },
+      { label: "Build VM", prompt: "Create an Azure VM with Terraform" },
+      { label: "Status", prompt: "Are you ready to build real Azure infrastructure?" },
+    ],
+  },
+  [CLOUD_GENERIC]: {
+    brandMark: "Infra Agent",
+    brandSub: "Operations Console",
+    loginLabel: "CLI Login",
+    consoleLabel: "Cloud Console",
+    consoleUrl: "https://console.aws.amazon.com",
+    identityTitle: "Cloud Identity",
+    identityHelp: "Select an MCP server to enable cloud-specific tools and identity details.",
+    identityPrefix: "Cloud",
+    welcome:
+      "Welcome back. Select an MCP server to enable cloud-specific infrastructure tooling.",
+    placeholder: "Select an MCP server, then ask for capabilities or workflows...",
+    workflowTitle: "Guided Workflow",
+    workflowSteps: [
+      "Select MCP server",
+      "Capture requirements",
+      "Generate Terraform",
+      "Plan and apply",
+    ],
+    quickActions: [
+      { label: "Capabilities", prompt: "What can you do for me?" },
+      { label: "Enable MCP", prompt: "Enable MCP and show capabilities" },
+      { label: "Terraform", prompt: "Show Terraform capabilities" },
+    ],
+  },
+};
 
 const setStatus = (value) => {
   statusMeta.textContent = value;
+};
+
+const setView = (view, updateHash = true) => {
+  currentView = view === "audit" ? "audit" : "console";
+
+  if (consoleView && auditView) {
+    consoleView.classList.toggle("hidden-view", currentView !== "console");
+    auditView.classList.toggle("hidden-view", currentView !== "audit");
+  }
+
+  if (navAuditBtn) navAuditBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+  if (navConsoleBtn) navConsoleBtn.style.display = currentView === "audit" ? "inline-flex" : "none";
+  if (awsLoginBtn) awsLoginBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+  if (awsConsoleBtn) awsConsoleBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+
+  if (brandMark && brandSub) {
+    if (currentView === "audit") {
+      brandMark.textContent = "Audit Trail";
+      brandSub.textContent = "Operations Audit";
+    } else {
+      applyCloudContext();
+    }
+  }
+
+  if (updateHash) {
+    const nextHash = currentView === "audit" ? "#audit" : "#console";
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  }
 };
 
 const escapeHtml = (value) =>
@@ -93,6 +218,71 @@ const updateLatency = (startTime) => {
   latencyLabel.textContent = `${(elapsedMs / 1000).toFixed(2)}s`;
 };
 
+const updateProviderLabel = () => {
+  const selected = modelSelect.value.split(MODEL_SEPARATOR);
+  providerLabel.textContent = selected[0] || "unknown";
+};
+
+const currentCloud = () => {
+  if (mcpSelect.value === "aws_terraform") return CLOUD_AWS;
+  if (mcpSelect.value === "azure_terraform") return CLOUD_AZURE;
+  return CLOUD_GENERIC;
+};
+
+const cloudForCapabilities = () => {
+  if (mcpSelect.value === "aws_terraform") return CLOUD_AWS;
+  if (mcpSelect.value === "azure_terraform") return CLOUD_AZURE;
+  return CLOUD_GENERIC;
+};
+
+const renderQuickActions = (items) => {
+  if (!quickActions) return;
+  quickActions.innerHTML = "";
+
+  items.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-chip";
+    button.dataset.prompt = item.prompt;
+    button.textContent = item.label;
+    button.addEventListener("click", () => {
+      const prompt = button.dataset.prompt || "";
+      if (!prompt) return;
+      promptInput.value = prompt;
+      promptInput.style.height = "auto";
+      promptInput.style.height = `${promptInput.scrollHeight}px`;
+      promptInput.focus();
+    });
+    quickActions.appendChild(button);
+  });
+};
+
+const applyCloudContext = () => {
+  const cloud = currentCloud();
+  const context = CLOUD_CONTEXT[cloud] || CLOUD_CONTEXT[CLOUD_GENERIC];
+
+  if (brandMark) brandMark.textContent = context.brandMark;
+  if (brandSub) brandSub.textContent = context.brandSub;
+  if (identityTitle) identityTitle.textContent = context.identityTitle;
+  if (identityHelp) identityHelp.textContent = context.identityHelp;
+  if (workflowTitle) workflowTitle.textContent = context.workflowTitle;
+  if (welcomeMessage) welcomeMessage.textContent = context.welcome;
+  if (promptInput) promptInput.placeholder = context.placeholder;
+
+  if (workflowList) {
+    workflowList.innerHTML = "";
+    context.workflowSteps.forEach((step) => {
+      const li = document.createElement("li");
+      li.textContent = step;
+      workflowList.appendChild(li);
+    });
+  }
+
+  renderQuickActions(context.quickActions);
+  syncCloudButtons(cloud);
+  syncIdentityPanel(cloud);
+};
+
 const loadModels = async () => {
   try {
     const response = await fetch("/api/models");
@@ -128,18 +318,13 @@ const loadModels = async () => {
     updateProviderLabel();
   } catch (error) {
     console.error(error);
-    modelSelect.innerHTML = "<option value=\"openai::gpt-4o-mini\">OpenAI · gpt-4o-mini</option>";
+    modelSelect.innerHTML = '<option value="openai::gpt-4o-mini">OpenAI · gpt-4o-mini</option>';
   }
-};
-
-const updateProviderLabel = () => {
-  const selected = modelSelect.value.split(MODEL_SEPARATOR);
-  providerLabel.textContent = selected[0] || "unknown";
 };
 
 modelSelect.addEventListener("change", updateProviderLabel);
 
-const categorizeTools = (tools) => {
+const categorizeTools = (tools, cloud) => {
   const dedupedMap = new Map();
   (tools || []).forEach((tool) => {
     const name = (tool.name || "").trim();
@@ -151,36 +336,55 @@ const categorizeTools = (tools) => {
     }
     const currentDesc = String(tool.description || "");
     const existingDesc = String(existing.description || "");
-    // Prefer the richer description when duplicate tool names appear.
     if (currentDesc.length > existingDesc.length) {
       dedupedMap.set(name, tool);
     }
   });
 
   const groups = {
-    "Discovery & Read-Only": [],
-    "AWS Infra Automation": [],
-    "Workflow Orchestration": [],
-    "Terraform Lifecycle (Generic)": [],
-    "Identity & Access": [],
-    "Other Tools": [],
+    discovery: [],
+    automation: [],
+    terraform: [],
+    identity: [],
+    workflow: [],
+    other: [],
   };
 
   [...dedupedMap.values()].forEach((tool) => {
     const name = (tool.name || "").trim();
-    if (name === "list_account_inventory" || name === "list_aws_resources" || name === "describe_resource") {
-      groups["Discovery & Read-Only"].push(tool);
-    } else if (name.startsWith("create_")) {
-      groups["AWS Infra Automation"].push(tool);
-    } else if (name.startsWith("start_") || name.startsWith("update_") || name.startsWith("review_")) {
-      groups["Workflow Orchestration"].push(tool);
-    } else if (name.startsWith("terraform_") || name === "get_infrastructure_state") {
-      groups["Terraform Lifecycle (Generic)"].push(tool);
-    } else if (name === "get_user_permissions") {
-      groups["Identity & Access"].push(tool);
-    } else {
-      groups["Other Tools"].push(tool);
+
+    if (
+      name === "list_account_inventory" ||
+      name === "list_aws_resources" ||
+      name === "describe_resource" ||
+      name === "list_azure_resources"
+    ) {
+      groups.discovery.push(tool);
+      return;
     }
+    if (name.startsWith("terraform_") || name === "get_infrastructure_state") {
+      groups.terraform.push(tool);
+      return;
+    }
+    if (name === "get_user_permissions" || name === "get_azure_subscription_context") {
+      groups.identity.push(tool);
+      return;
+    }
+    if (name.startsWith("start_") || name.startsWith("update_") || name.startsWith("review_")) {
+      groups.workflow.push(tool);
+      return;
+    }
+    if (name.startsWith("create_")) {
+      groups.automation.push(tool);
+      return;
+    }
+
+    if (cloud === CLOUD_AZURE && (name.includes("azure") || name.includes("resource"))) {
+      groups.automation.push(tool);
+      return;
+    }
+
+    groups.other.push(tool);
   });
 
   return groups;
@@ -188,67 +392,84 @@ const categorizeTools = (tools) => {
 
 const renderCapabilities = (tools) => {
   if (!capabilitiesContent) return;
-  const groups = categorizeTools(tools || []);
-  const serviceSummary = [
-    {
+
+  const cloud = cloudForCapabilities();
+  const groups = categorizeTools(tools || [], cloud);
+  const cards = [];
+
+  if (groups.discovery.length > 0) {
+    cards.push({
       title: "Discovery & Inventory",
-      description: "Account-wide listing and detailed resource lookups across regions.",
-      active: groups["Discovery & Read-Only"].length > 0,
-      hint: "Ask: List all resources in my account",
-    },
-    {
-      title: "Compute",
-      description: "Provision and manage EC2, Lambda, and ECS deployment flows.",
-      active: groups["AWS Infra Automation"].some((t) => ["create_ec2_instance", "create_lambda_function", "create_ecs_service"].includes(t.name)),
-      hint: "Ask: Show ECS capabilities",
-    },
-    {
-      title: "Storage",
-      description: "S3 bucket provisioning and related infrastructure automation.",
-      active: groups["AWS Infra Automation"].some((t) => t.name === "create_s3_bucket"),
-      hint: "Ask: Show S3 capabilities",
-    },
-    {
-      title: "Database",
-      description: "RDS provisioning workflows and deployment support.",
-      active: groups["AWS Infra Automation"].some((t) => t.name === "create_rds_instance"),
-      hint: "Ask: Show RDS capabilities",
-    },
-    {
-      title: "Networking",
-      description: "VPC and subnet-oriented infrastructure setup and validation.",
-      active: groups["AWS Infra Automation"].some((t) => t.name === "create_vpc"),
-      hint: "Ask: Show VPC capabilities",
-    },
-    {
+      description:
+        cloud === CLOUD_AZURE
+          ? "List available Azure resources and inspect discovery options."
+          : "Account-wide listing and detailed resource lookups across regions.",
+      hint:
+        cloud === CLOUD_AZURE
+          ? "Ask: List all Azure resources available for build"
+          : "Ask: List all resources in my account",
+    });
+  }
+
+  if (groups.automation.length > 0) {
+    cards.push({
+      title: cloud === CLOUD_AZURE ? "Azure Infra Automation" : "AWS Infra Automation",
+      description:
+        cloud === CLOUD_AZURE
+          ? "Dummy Azure provisioning commands are exposed while real execution is under construction."
+          : "Provision and manage compute, storage, database, and networking resources.",
+      hint: cloud === CLOUD_AZURE ? "Ask: Create an Azure VM" : "Ask: Show ECS capabilities",
+    });
+  }
+
+  if (groups.terraform.length > 0) {
+    cards.push({
       title: "Terraform Lifecycle",
-      description: "Generic plan, apply, destroy, and state operations.",
-      active: groups["Terraform Lifecycle (Generic)"].length > 0,
+      description:
+        cloud === CLOUD_AZURE
+          ? "Preview terraform plan output for Azure. Apply/build is currently under construction."
+          : "Generic plan, apply, destroy, and state operations.",
       hint: "Ask: Show Terraform capabilities",
-    },
-    {
+    });
+  }
+
+  if (groups.identity.length > 0) {
+    cards.push({
       title: "Identity & Access",
-      description: "AWS identity checks and permissions context.",
-      active: groups["Identity & Access"].length > 0,
-      hint: "Ask: Show IAM capabilities",
-    },
-    {
+      description:
+        cloud === CLOUD_AZURE
+          ? "Subscription/identity context checks (dummy in this build)."
+          : "AWS identity checks and permissions context.",
+      hint: cloud === CLOUD_AZURE ? "Ask: Show Azure identity context" : "Ask: Show IAM capabilities",
+    });
+  }
+
+  if (groups.workflow.length > 0) {
+    cards.push({
       title: "Guided Workflows",
       description: "Multi-step orchestration with preflight validation gates.",
-      active: groups["Workflow Orchestration"].length > 0,
       hint: "Ask: Show workflow capabilities",
-    },
-  ];
+    });
+  }
 
-  const activeCards = serviceSummary
-    .filter((item) => item.active)
+  if (cards.length === 0 && (tools || []).length > 0) {
+    (tools || []).forEach((tool) => {
+      cards.push({
+        title: tool.name || "Tool",
+        description: tool.description || "No description available.",
+        hint: "",
+      });
+    });
+  }
+
+  const rendered = cards
     .map(
       (item) =>
-        `<div class="cap-tool"><div class="cap-tool-name">${escapeHtml(item.title)}</div><div class="cap-tool-desc">${escapeHtml(item.description)}</div><div class="cap-tool-hint">${escapeHtml(item.hint)}</div></div>`
+        `<div class="cap-tool"><div class="cap-tool-name">${escapeHtml(item.title)}</div><div class="cap-tool-desc">${escapeHtml(item.description)}</div>${item.hint ? `<div class="cap-tool-hint">${escapeHtml(item.hint)}</div>` : ""}</div>`
     )
     .join("");
 
-  capabilitiesContent.innerHTML = activeCards || "No capabilities available.";
+  capabilitiesContent.innerHTML = rendered || "No capabilities available.";
 };
 
 const loadCapabilities = async () => {
@@ -261,7 +482,8 @@ const loadCapabilities = async () => {
   }
 
   try {
-    const response = await fetch("/api/mcp/tools");
+    const serverName = encodeURIComponent(mcpSelect.value);
+    const response = await fetch(`/api/mcp/tools?mcpServer=${serverName}`);
     if (!response.ok) {
       throw new Error("Unable to fetch MCP tools");
     }
@@ -272,10 +494,6 @@ const loadCapabilities = async () => {
     capabilitiesContent.textContent = "Failed to load capabilities.";
   }
 };
-
-mcpSelect.addEventListener("change", () => {
-  loadCapabilities();
-});
 
 const parseSse = async (response, onEvent) => {
   const reader = response.body.getReader();
@@ -397,17 +615,6 @@ composer.addEventListener("submit", (event) => {
   sendMessage(promptInput.value);
 });
 
-promptChips.forEach((chip) => {
-  chip.addEventListener("click", () => {
-    const prompt = chip.dataset.prompt || "";
-    if (!prompt) return;
-    promptInput.value = prompt;
-    promptInput.style.height = "auto";
-    promptInput.style.height = `${promptInput.scrollHeight}px`;
-    promptInput.focus();
-  });
-});
-
 promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -420,13 +627,42 @@ promptInput.addEventListener("input", () => {
   promptInput.style.height = `${promptInput.scrollHeight}px`;
 });
 
-// AWS Login & Identity Handling
 const awsLoginBtn = document.getElementById("awsLoginBtn");
 const awsConsoleBtn = document.getElementById("awsConsoleBtn");
 const awsIdentity = document.getElementById("awsIdentity");
 const awsAccountLabel = document.getElementById("awsAccount");
 
+const syncCloudButtons = (cloud) => {
+  const context = CLOUD_CONTEXT[cloud] || CLOUD_CONTEXT[CLOUD_GENERIC];
+  awsConsoleBtn.textContent = context.consoleLabel;
+  awsConsoleBtn.dataset.targetUrl = context.consoleUrl;
+
+  if (cloud === CLOUD_AZURE) {
+    awsLoginBtn.textContent = context.loginLabel;
+    awsLoginBtn.disabled = true;
+    awsLoginBtn.classList.remove("btn-primary");
+    awsLoginBtn.classList.add("btn-secondary");
+    return;
+  }
+
+  awsLoginBtn.disabled = false;
+};
+
+const syncIdentityPanel = (cloud) => {
+  const context = CLOUD_CONTEXT[cloud] || CLOUD_CONTEXT[CLOUD_GENERIC];
+
+  if (cloud !== CLOUD_AWS) {
+    awsIdentity.style.display = "flex";
+    awsAccountLabel.textContent = `${context.identityPrefix}: context unavailable in this build`;
+    return;
+  }
+
+  refreshAwsIdentity();
+};
+
 const refreshAwsIdentity = async () => {
+  if (currentCloud() !== CLOUD_AWS) return;
+
   try {
     const response = await fetch("/api/aws/identity");
     const data = await response.json();
@@ -448,14 +684,21 @@ const refreshAwsIdentity = async () => {
 };
 
 awsConsoleBtn.addEventListener("click", () => {
-  window.open("https://console.aws.amazon.com", "_blank");
+  const cloud = currentCloud();
+  const context = CLOUD_CONTEXT[cloud] || CLOUD_CONTEXT[CLOUD_GENERIC];
+  const target = awsConsoleBtn.dataset.targetUrl || context.consoleUrl;
+  window.open(target, "_blank");
 });
 
 awsLoginBtn.addEventListener("click", async () => {
-  const profile = prompt("Enter AWS Profile name (e.g. sso-profile) or leave blank for 'default':", "default");
-  if (profile === null) return; // Cancelled
+  if (currentCloud() !== CLOUD_AWS) {
+    addMessage("assistant", "Azure login integration is currently under construction.");
+    return;
+  }
 
-  // Set the profile first
+  const profile = prompt("Enter AWS Profile name (e.g. sso-profile) or leave blank for 'default':", "default");
+  if (profile === null) return;
+
   await fetch("/api/aws/profile", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -474,7 +717,6 @@ awsLoginBtn.addEventListener("click", async () => {
     if (data.success) {
       alert(`CLI Login process started for profile '${profile}'! Please check your terminal or browser.`);
       addMessage("assistant", `AWS CLI Login initiated for profile: ${profile}. If no browser tab opened automatically, please run 'aws sso login --profile ${profile}' in your terminal.`);
-      // Refresh identity after a short delay
       setTimeout(refreshAwsIdentity, 5000);
     } else {
       alert(data.error || "Failed to trigger login");
@@ -487,9 +729,41 @@ awsLoginBtn.addEventListener("click", async () => {
   }
 });
 
-// Refresh identity every 30 seconds
+mcpSelect.addEventListener("change", () => {
+  applyCloudContext();
+  loadCapabilities();
+});
+
+if (navAuditBtn) {
+  navAuditBtn.addEventListener("click", () => setView("audit"));
+}
+
+if (navConsoleBtn) {
+  navConsoleBtn.addEventListener("click", () => setView("console"));
+}
+
+document.querySelectorAll('[data-nav="audit"]').forEach((el) => {
+  el.addEventListener("click", (event) => {
+    event.preventDefault();
+    setView("audit");
+  });
+});
+
+window.addEventListener("hashchange", () => {
+  if (window.location.hash === "#audit") {
+    setView("audit", false);
+  } else {
+    setView("console", false);
+  }
+});
+
 setInterval(refreshAwsIdentity, 30000);
-refreshAwsIdentity();
 
 loadModels();
+applyCloudContext();
 loadCapabilities();
+if (window.location.hash === "#audit") {
+  setView("audit", false);
+} else {
+  setView("console", false);
+}

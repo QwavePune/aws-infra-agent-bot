@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AWS Infra Agent Bot - Audit Trail</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/audit.css" />
+</head>
+<body>
+  <div class="app-shell audit-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">Audit Trail</span>
+        <span class="brand-sub">Track infrastructure changes and tool actions</span>
+      </div>
+      <div class="topbar-actions">
+        <a href="/" class="btn-secondary topbar-link">Back To Console</a>
+        <button id="exportBtn" class="btn-primary">Export Audit Log</button>
+      </div>
+    </header>
+
+    <main class="audit-layout">
+      <section class="audit-summary-grid">
+        <article class="stat-card audit-card">
+          <div class="stat-label">Total Actions</div>
+          <div id="totalActions" class="audit-metric">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Successful</div>
+          <div id="successfulActions" class="audit-metric audit-ok">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Failed</div>
+          <div id="failedActions" class="audit-metric audit-fail">0</div>
+        </article>
+        <article class="stat-card audit-card">
+          <div class="stat-label">Blocked</div>
+          <div id="blockedActions" class="audit-metric audit-warn">0</div>
+        </article>
+      </section>
+
+      <section class="rail-card audit-filter-card">
+        <div class="audit-filter-header">
+          <h3>Filters</h3>
+          <button id="clearFiltersBtn" class="btn-secondary">Clear Filters</button>
+        </div>
+        <div class="audit-filters">
+          <label>
+            Cloud Provider
+            <select id="cloudFilter">
+              <option value="">All Providers</option>
+            </select>
+          </label>
+          <label>
+            Status
+            <select id="statusFilter">
+              <option value="">All Statuses</option>
+            </select>
+          </label>
+          <label>
+            Action
+            <select id="actionFilter">
+              <option value="">All Actions</option>
+            </select>
+          </label>
+          <label>
+            User
+            <select id="userFilter">
+              <option value="">All Users</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="rail-card audit-table-card">
+        <div class="audit-table-header">
+          <h3>Audit Entries</h3>
+          <span id="entryCount" class="audit-count">Showing 0 entries</span>
+        </div>
+        <div class="audit-table-wrap">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>User</th>
+                <th>Cloud</th>
+                <th>Action</th>
+                <th>Resource</th>
+                <th>Status</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="auditTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="rail-card audit-note">
+        <h3>Compliance Notice</h3>
+        <p>
+          Workflow audit events are retained with daily rotation (up to 30 files). Export logs for compliance reporting and long-term archival where needed.
+        </p>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/audit.js"></script>
+</body>
+</html>

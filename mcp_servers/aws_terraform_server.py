@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import boto3
@@ -286,6 +286,37 @@ class MCPAWSManagerServer:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Optional list of AWS regions. If omitted, uses allowed regions."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "get_cost_explorer_summary",
+                "description": "Read-only. Get AWS Cost Explorer totals for a date range, optionally grouped by service.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {
+                            "type": "string",
+                            "description": "Inclusive start date in YYYY-MM-DD. Defaults to first day of current month."
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "Exclusive end date in YYYY-MM-DD. Defaults to tomorrow (UTC)."
+                        },
+                        "granularity": {
+                            "type": "string",
+                            "enum": ["DAILY", "MONTHLY"],
+                            "description": "Granularity for Cost Explorer results. Defaults to MONTHLY."
+                        },
+                        "group_by_service": {
+                            "type": "boolean",
+                            "description": "Whether to include service-level cost breakdown. Defaults to true."
+                        },
+                        "metric": {
+                            "type": "string",
+                            "enum": ["UnblendedCost", "BlendedCost", "AmortizedCost", "NetUnblendedCost", "NetAmortizedCost"],
+                            "description": "Cost metric to query. Defaults to UnblendedCost."
                         }
                     }
                 }
@@ -1435,6 +1466,7 @@ class MCPAWSManagerServer:
         # Route to appropriate handler
         handlers = {
             "list_account_inventory": self._list_account_inventory,
+            "get_cost_explorer_summary": self._get_cost_explorer_summary,
             "list_aws_resources": self._list_aws_resources,
             "describe_resource": self._describe_resource,
             "start_ecs_deployment_workflow": self._start_ecs_deployment_workflow,
@@ -1454,9 +1486,6 @@ class MCPAWSManagerServer:
             "parse_mermaid_architecture": self._parse_mermaid_architecture,
             "generate_terraform_from_architecture": self._generate_terraform_from_architecture,
             "deploy_architecture": self._deploy_architecture,
-            "list_aws_resources": self._list_aws_resources,
-            "describe_resource": self._describe_resource,
-            "list_account_inventory": self._list_account_inventory
         }
         
         handler = handlers.get(tool_name)
@@ -1649,6 +1678,87 @@ class MCPAWSManagerServer:
             "regions_scanned": regions,
             "regional_breakdown": regional_breakdown
         }
+
+    def _get_cost_explorer_summary(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only AWS Cost Explorer summary for a date window."""
+        params = params or {}
+        granularity = (params.get("granularity") or "MONTHLY").upper()
+        if granularity not in {"DAILY", "MONTHLY"}:
+            return {"success": False, "error": "granularity must be DAILY or MONTHLY"}
+
+        metric = params.get("metric") or "UnblendedCost"
+        allowed_metrics = {"UnblendedCost", "BlendedCost", "AmortizedCost", "NetUnblendedCost", "NetAmortizedCost"}
+        if metric not in allowed_metrics:
+            return {"success": False, "error": f"metric must be one of: {', '.join(sorted(allowed_metrics))}"}
+
+        try:
+            today_utc = datetime.utcnow().date()
+            default_start = today_utc.replace(day=1)
+            default_end = today_utc + timedelta(days=1)  # Cost Explorer End is exclusive.
+
+            start_date = datetime.strptime(params.get("start_date") or default_start.isoformat(), "%Y-%m-%d").date()
+            end_date = datetime.strptime(params.get("end_date") or default_end.isoformat(), "%Y-%m-%d").date()
+            if start_date >= end_date:
+                return {"success": False, "error": "start_date must be earlier than end_date"}
+
+            request: Dict[str, Any] = {
+                "TimePeriod": {"Start": start_date.isoformat(), "End": end_date.isoformat()},
+                "Granularity": granularity,
+                "Metrics": [metric],
+            }
+            group_by_service = params.get("group_by_service", True)
+            if group_by_service:
+                request["GroupBy"] = [{"Type": "DIMENSION", "Key": "SERVICE"}]
+
+            ce = boto3.client("ce", region_name="us-east-1")
+            response = ce.get_cost_and_usage(**request)
+
+            total_cost = 0.0
+            currency = "USD"
+            by_service: Dict[str, float] = {}
+            periods = response.get("ResultsByTime", [])
+
+            for period in periods:
+                total_metric = period.get("Total", {}).get(metric, {})
+                period_group_total = 0.0
+                if total_metric:
+                    total_cost += float(total_metric.get("Amount", "0") or 0.0)
+                    currency = total_metric.get("Unit", currency) or currency
+
+                for group in period.get("Groups", []):
+                    service = (group.get("Keys") or ["Unknown"])[0]
+                    metric_data = group.get("Metrics", {}).get(metric, {})
+                    amount = float(metric_data.get("Amount", "0") or 0.0)
+                    period_group_total += amount
+                    by_service[service] = by_service.get(service, 0.0) + amount
+                    currency = metric_data.get("Unit", currency) or currency
+
+                # Cost Explorer commonly omits period Total when GroupBy is used.
+                if not total_metric and period_group_total:
+                    total_cost += period_group_total
+
+            service_breakdown = [
+                {"service": service, "amount": round(amount, 4), "currency": currency}
+                for service, amount in sorted(by_service.items(), key=lambda x: x[1], reverse=True)
+            ]
+
+            return {
+                "success": True,
+                "start_date": start_date.isoformat(),
+                "end_date_exclusive": end_date.isoformat(),
+                "granularity": granularity,
+                "metric": metric,
+                "total_cost": {"amount": round(total_cost, 4), "currency": currency},
+                "service_count": len(service_breakdown),
+                "services": service_breakdown if group_by_service else [],
+                "message": "Cost Explorer summary retrieved successfully."
+            }
+        except ValueError:
+            return {"success": False, "error": "Invalid date format. Use YYYY-MM-DD for start_date/end_date."}
+        except ClientError as e:
+            return {"success": False, "error": f"Failed to query Cost Explorer: {str(e)}"}
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error querying Cost Explorer: {str(e)}"}
 
     def _start_ecs_deployment_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Start a multi-turn ECS deployment workflow."""

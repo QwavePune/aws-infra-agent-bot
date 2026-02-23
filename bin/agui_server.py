@@ -2,7 +2,10 @@ import json
 import time
 import uuid
 import subprocess
-from typing import Dict, List, Optional, Any
+import csv
+import io
+import glob
+from typing import Dict, List, Optional, Any, Iterable, Tuple
 import warnings
 import os
 import logging
@@ -27,7 +30,7 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -45,17 +48,30 @@ from core.architecture_parser import ArchitectureParser
 from core.agent_protocol import EXECUTION_SYSTEM_PROMPT, extract_tool_calls, build_followup_message
 from core.workflow_logger import setup_workflow_logger, workflow_event
 
-# Import MCP server
+# Import MCP servers
 try:
     from mcp_servers.aws_terraform_server import mcp_server as aws_mcp
-    MCP_AVAILABLE = True
+    AWS_MCP_AVAILABLE = True
     logger_temp = logging.getLogger(__name__)
     logger_temp.info("AWS Terraform MCP Server loaded successfully")
 except ImportError as e:
-    MCP_AVAILABLE = False
+    AWS_MCP_AVAILABLE = False
     logger_temp = logging.getLogger(__name__)
-    logger_temp.warning(f"MCP Server not available: {e}")
+    logger_temp.warning(f"AWS MCP Server not available: {e}")
     aws_mcp = None
+
+try:
+    from mcp_servers.azure_terraform_server import mcp_server as azure_mcp
+    AZURE_MCP_AVAILABLE = True
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.info("Azure Terraform MCP Server loaded successfully")
+except ImportError as e:
+    AZURE_MCP_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning(f"Azure MCP Server not available: {e}")
+    azure_mcp = None
+
+MCP_AVAILABLE = AWS_MCP_AVAILABLE or AZURE_MCP_AVAILABLE
 
 LOG_DIR = os.path.join(APP_ROOT, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -74,6 +90,7 @@ logger = logging.getLogger(__name__)
 workflow_logger = setup_workflow_logger(APP_ROOT, "agui")
 
 UI_DIR = os.path.join(APP_ROOT, 'ui')
+WORKFLOW_LOG_DIR = os.path.join(APP_ROOT, "logs", "workflow_execution_log")
 
 app = FastAPI(title="AWS Infra Agent Bot - AG-UI")
 app.mount("/static", StaticFiles(directory=UI_DIR), name="static")
@@ -85,6 +102,189 @@ logger.info("=" * 80)
 
 conversation_store: Dict[str, List] = {}
 llm_cache: Dict[str, object] = {}
+
+
+def _audit_is_mutating_tool(tool_name: str) -> bool:
+    """Audit-local mutating classification for tool names."""
+    if is_mutating_tool(tool_name):
+        return True
+    return tool_name in {
+        "create_ecs_service",
+        "start_ecs_deployment_workflow",
+        "update_ecs_deployment_workflow",
+        "review_ecs_deployment_workflow",
+        "deploy_architecture",
+    }
+
+
+def _iter_audit_events(channel: str = "agui") -> Iterable[Dict[str, Any]]:
+    """Yield workflow events from rotated JSONL files in chronological file order."""
+    base = os.path.join(WORKFLOW_LOG_DIR, f"workflow_execution_log_{channel}.jsonl")
+    paths = sorted(glob.glob(f"{base}*"))
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        yield record
+        except FileNotFoundError:
+            continue
+
+
+def _audit_cloud_for_tool(tool_name: str) -> str:
+    lower = (tool_name or "").lower()
+    if "azure" in lower:
+        return "azure"
+    return "aws"
+
+
+def _audit_extract_resource(tool_name: str, tool_args: Dict[str, Any], tool_result: Dict[str, Any]) -> str:
+    """Best-effort resource label from tool args/result."""
+    if tool_args:
+        for key in ("bucket_name", "db_name", "function_name", "project_name", "workflow_id", "resource_id", "cluster_name", "service_name"):
+            value = tool_args.get(key)
+            if value:
+                return str(value)
+    if tool_result:
+        for key in ("project_name", "resource_id", "workflow_id"):
+            value = tool_result.get(key)
+            if value:
+                return str(value)
+    return "n/a"
+
+
+def _audit_extract_details(tool_result: Dict[str, Any]) -> str:
+    if not isinstance(tool_result, dict):
+        return str(tool_result)[:240]
+    if tool_result.get("error"):
+        return str(tool_result.get("error"))[:240]
+    if tool_result.get("message"):
+        return str(tool_result.get("message"))[:240]
+    for key in ("stdout", "details"):
+        value = tool_result.get(key)
+        if value:
+            return str(value).replace("\n", " ")[:240]
+    return "tool executed"
+
+
+def _collect_audit_entries(
+    cloud: Optional[str] = None,
+    status: Optional[str] = None,
+    action: Optional[str] = None,
+    user: Optional[str] = None,
+    limit: int = 500,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
+    started_by_call: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    actor_by_run: Dict[str, str] = {}
+    entries: List[Dict[str, Any]] = []
+
+    for record in _iter_audit_events(channel="agui"):
+        event_type = record.get("event_type")
+        run_id = record.get("run_id", "")
+        tool_name = record.get("tool_name", "")
+        tool_call_id = record.get("tool_call_id", "")
+        key = (run_id, tool_call_id)
+
+        if event_type == "tool_execution_started":
+            started_by_call[key] = record.get("tool_args", {}) or {}
+            continue
+
+        if event_type == "tool_execution_completed":
+            result = record.get("tool_result", {}) or {}
+            if tool_name == "get_user_permissions" and result.get("success"):
+                actor = (result.get("user_info", {}) or {}).get("user_arn") or (result.get("user_info", {}) or {}).get("account_id")
+                if actor:
+                    actor_by_run[run_id] = str(actor)
+
+            if not _audit_is_mutating_tool(tool_name):
+                continue
+
+            entry_status = "success" if record.get("success", False) else "failed"
+            tool_args = started_by_call.get(key, {})
+            cloud_name = _audit_cloud_for_tool(tool_name)
+            actor = actor_by_run.get(run_id, "unknown")
+            entry = {
+                "timestamp": record.get("timestamp"),
+                "run_id": run_id,
+                "thread_id": record.get("thread_id"),
+                "user": actor,
+                "cloud": cloud_name,
+                "action": tool_name,
+                "resource": _audit_extract_resource(tool_name, tool_args, result),
+                "status": entry_status,
+                "details": _audit_extract_details(result),
+                "tool_args": tool_args,
+            }
+            entries.append(entry)
+            continue
+
+        if event_type in {"tool_execution_failed", "tool_execution_blocked"} and _audit_is_mutating_tool(tool_name):
+            tool_args = started_by_call.get(key, {})
+            cloud_name = _audit_cloud_for_tool(tool_name)
+            actor = actor_by_run.get(run_id, "unknown")
+            failed_status = "blocked" if event_type == "tool_execution_blocked" else "failed"
+            details = record.get("reason") or record.get("error") or event_type
+            entries.append({
+                "timestamp": record.get("timestamp"),
+                "run_id": run_id,
+                "thread_id": record.get("thread_id"),
+                "user": actor,
+                "cloud": cloud_name,
+                "action": tool_name,
+                "resource": _audit_extract_resource(tool_name, tool_args, {}),
+                "status": failed_status,
+                "details": str(details)[:240],
+                "tool_args": tool_args,
+            })
+
+    entries.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    def _match(v: Optional[str], expected: Optional[str]) -> bool:
+        if not expected:
+            return True
+        return str(v or "").lower() == expected.lower()
+
+    filtered = [
+        entry for entry in entries
+        if _match(entry.get("cloud"), cloud)
+        and _match(entry.get("status"), status)
+        and _match(entry.get("action"), action)
+        and _match(entry.get("user"), user)
+    ]
+
+    if limit > 0:
+        filtered = filtered[:limit]
+
+    summary = {
+        "total": len(filtered),
+        "successful": sum(1 for e in filtered if e.get("status") == "success"),
+        "failed": sum(1 for e in filtered if e.get("status") == "failed"),
+        "blocked": sum(1 for e in filtered if e.get("status") == "blocked"),
+    }
+
+    filters = {
+        "clouds": sorted({e.get("cloud") for e in entries if e.get("cloud")}),
+        "statuses": sorted({e.get("status") for e in entries if e.get("status")}),
+        "actions": sorted({e.get("action") for e in entries if e.get("action")}),
+        "users": sorted({e.get("user") for e in entries if e.get("user")}),
+    }
+
+    return filtered, summary, filters
+
+
+def get_mcp_server(server_name: Optional[str]):
+    if server_name == "aws_terraform":
+        return aws_mcp if AWS_MCP_AVAILABLE else None
+    if server_name == "azure_terraform":
+        return azure_mcp if AZURE_MCP_AVAILABLE else None
+    return None
 
 
 class RunRequest(BaseModel):
@@ -100,6 +300,12 @@ class RunRequest(BaseModel):
 async def index():
     logger.debug("Serving index.html")
     return FileResponse(f"{UI_DIR}/index.html")
+
+
+@app.get("/audit")
+async def audit_page():
+    logger.debug("Serving audit.html")
+    return FileResponse(f"{UI_DIR}/audit.html")
 
 
 @app.get("/api/models")
@@ -119,21 +325,93 @@ async def list_models():
     return JSONResponse({"providers": providers})
 
 
+@app.get("/api/audit/logs")
+async def list_audit_logs(
+    cloud: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    action: Optional[str] = Query(default=None),
+    user: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    logger.info("API Request: GET /api/audit/logs")
+    entries, summary, filters = _collect_audit_entries(
+        cloud=cloud,
+        status=status,
+        action=action,
+        user=user,
+        limit=limit,
+    )
+    return JSONResponse({
+        "summary": summary,
+        "entries": entries,
+        "filters": filters,
+        "applied": {
+            "cloud": cloud,
+            "status": status,
+            "action": action,
+            "user": user,
+            "limit": limit,
+        },
+    })
+
+
+@app.get("/api/audit/export")
+async def export_audit_logs(
+    cloud: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    action: Optional[str] = Query(default=None),
+    user: Optional[str] = Query(default=None),
+):
+    logger.info("API Request: GET /api/audit/export")
+    entries, _summary, _filters = _collect_audit_entries(
+        cloud=cloud,
+        status=status,
+        action=action,
+        user=user,
+        limit=2000,
+    )
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=["timestamp", "user", "cloud", "action", "resource", "status", "details", "run_id", "thread_id"],
+    )
+    writer.writeheader()
+    for entry in entries:
+        writer.writerow({
+            "timestamp": entry.get("timestamp", ""),
+            "user": entry.get("user", ""),
+            "cloud": entry.get("cloud", ""),
+            "action": entry.get("action", ""),
+            "resource": entry.get("resource", ""),
+            "status": entry.get("status", ""),
+            "details": entry.get("details", ""),
+            "run_id": entry.get("run_id", ""),
+            "thread_id": entry.get("thread_id", ""),
+        })
+
+    filename = f"audit-log-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv", headers=headers)
+
+
 @app.get("/api/mcp/status")
-async def mcp_status():
+async def mcp_status(mcpServer: str = Query(default="aws_terraform")):
     """Get MCP server status"""
-    logger.info("API Request: GET /api/mcp/status")
-    
-    if not MCP_AVAILABLE or aws_mcp is None:
+    logger.info(f"API Request: GET /api/mcp/status - Server: {mcpServer}")
+    mcp_server = get_mcp_server(mcpServer)
+
+    if not MCP_AVAILABLE or mcp_server is None:
         return JSONResponse({
             "available": False,
-            "message": "MCP Server not available"
+            "message": f"MCP Server not available: {mcpServer}"
         })
     
     try:
-        init_result = aws_mcp.initialize()
+        init_result = mcp_server.initialize()
         return JSONResponse({
             "available": True,
+            "server": mcpServer,
             "initialized": init_result.get("success", False),
             "user_info": init_result.get("user_info", {}),
             "message": init_result.get("message", "")
@@ -148,17 +426,18 @@ async def mcp_status():
 
 
 @app.get("/api/mcp/tools")
-async def list_mcp_tools():
+async def list_mcp_tools(mcpServer: str = Query(default="aws_terraform")):
     """List available MCP tools"""
-    logger.info("API Request: GET /api/mcp/tools")
-    
-    if not MCP_AVAILABLE or aws_mcp is None:
+    logger.info(f"API Request: GET /api/mcp/tools - Server: {mcpServer}")
+    mcp_server = get_mcp_server(mcpServer)
+
+    if not MCP_AVAILABLE or mcp_server is None:
         return JSONResponse({"tools": [], "error": "MCP Server not available"})
     
     try:
-        tools = aws_mcp.list_tools()
+        tools = mcp_server.list_tools()
         logger.info(f"Returning {len(tools)} MCP tools")
-        return JSONResponse({"tools": tools})
+        return JSONResponse({"tools": tools, "server": mcpServer})
     except Exception as e:
         logger.error(f"Failed to list MCP tools: {e}")
         return JSONResponse({"tools": [], "error": str(e)})
@@ -167,22 +446,24 @@ async def list_mcp_tools():
 class MCPToolRequest(BaseModel):
     tool_name: str
     parameters: Dict[str, Any]
+    mcpServer: Optional[str] = "aws_terraform"
 
 
 @app.post("/api/mcp/execute")
 async def execute_mcp_tool(request: MCPToolRequest):
     """Execute an MCP tool"""
-    logger.info(f"API Request: POST /api/mcp/execute - Tool: {request.tool_name}")
+    logger.info(f"API Request: POST /api/mcp/execute - Server: {request.mcpServer}, Tool: {request.tool_name}")
     logger.info(f"Parameters: {request.parameters}")
-    
-    if not MCP_AVAILABLE or aws_mcp is None:
+
+    mcp_server = get_mcp_server(request.mcpServer)
+    if not MCP_AVAILABLE or mcp_server is None:
         return JSONResponse({
             "success": False,
             "error": "MCP Server not available"
         })
     
     try:
-        result = aws_mcp.execute_tool(request.tool_name, request.parameters)
+        result = mcp_server.execute_tool(request.tool_name, request.parameters)
         logger.info(f"MCP tool execution result: {result.get('success', False)}")
         return JSONResponse(result)
     except Exception as e:
@@ -293,15 +574,12 @@ def get_llm(provider: str, model: Optional[str], credential_source: Optional[str
     llm = initialize_llm(provider, model=model, preferred_source=credential_source)
     
     # Bind tools if MCP server is selected
-    if mcp_server_name == "aws_terraform" and MCP_AVAILABLE and aws_mcp:
-        tools = aws_mcp.list_tools()
-        # Transform MCP tools to LangChain tools format if necessary
-        # For simplicity, we'll assume the LLM supports .bind_tools()
+    selected_mcp = get_mcp_server(mcp_server_name)
+    if mcp_server_name != "none" and MCP_AVAILABLE and selected_mcp:
+        tools = selected_mcp.list_tools()
         try:
-            # Note: In a real scenario, you'd map these dicts to Tool objects or pass them directly if supported
-            # Here we'll pass the tool definitions as dicts which many modern ChatModels support
             llm = llm.bind_tools(tools)
-            logger.info(f"Successfully bound {len(tools)} tools from AWS Terraform MCP")
+            logger.info(f"Successfully bound {len(tools)} tools from MCP server: {mcp_server_name}")
         except Exception as e:
             logger.warning(f"Failed to bind tools to LLM: {e}")
 
@@ -416,7 +694,7 @@ async def run_agent(payload: RunRequest):
         )
 
     if is_capabilities_request(payload.message):
-        active_mcp = aws_mcp if payload.mcpServer == "aws_terraform" else None
+        active_mcp = get_mcp_server(payload.mcpServer)
         response_text = build_capabilities_response(payload.mcpServer, active_mcp, payload.message)
         workflow_event(
             workflow_logger,
@@ -560,7 +838,7 @@ async def run_agent(payload: RunRequest):
                         )
                         forced_followup_text = (
                             "Perplexity (Sonar) does not support MCP tool calling for this request. "
-                            "No AWS tools were executed. Switch to GPT-4o or Gemini and re-run the same prompt."
+                            "No MCP tools were executed. Switch to GPT-4o or Gemini and re-run the same prompt."
                         )
                         response = AIMessage(content="")
                         history.append(response)
@@ -639,7 +917,7 @@ async def run_agent(payload: RunRequest):
                             tool_name=tool_name,
                             tool_call_id=tool_call_id,
                             tool_args=tool_args,
-                            metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                            metadata={"class": "MCPServer", "method": "execute_tool"},
                         )
 
                         if read_only_intent and is_mutating_tool(tool_name):
@@ -657,16 +935,17 @@ async def run_agent(payload: RunRequest):
                             history.append(ToolMessage(
                                 content=json.dumps({
                                     "success": False,
-                                    "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use list_account_inventory, list_aws_resources, or describe_resource."
+                                    "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use discovery/list tools instead."
                                 }),
                                 tool_call_id=tool_call_id
                             ))
                             continue
                         
                         # Execute tool via MCP
-                        if payload.mcpServer == "aws_terraform" and aws_mcp:
+                        selected_mcp = get_mcp_server(payload.mcpServer)
+                        if selected_mcp:
                             try:
-                                result = aws_mcp.execute_tool(tool_name, tool_args)
+                                result = selected_mcp.execute_tool(tool_name, tool_args)
                                 logger.info(f"[{run_id}] Tool {tool_name} executed. Success: {result.get('success', False)}")
                                 if tool_name == "terraform_plan" and result.get("success"):
                                     planned_project = (tool_args or {}).get("project_name")
@@ -682,7 +961,7 @@ async def run_agent(payload: RunRequest):
                                     tool_call_id=tool_call_id,
                                     success=result.get("success", False),
                                     tool_result=result,
-                                    metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                                    metadata={"class": "MCPServer", "method": "execute_tool"},
                                 )
                                 followup_text = build_followup_message(tool_name, result)
                                 if followup_text:
@@ -712,7 +991,7 @@ async def run_agent(payload: RunRequest):
                                     tool_name=tool_name,
                                     tool_call_id=tool_call_id,
                                     error=str(tool_err),
-                                    metadata={"class": "MCPAWSManagerServer", "method": "execute_tool"},
+                                    metadata={"class": "MCPServer", "method": "execute_tool"},
                                 )
                                 history.append(ToolMessage(
                                     content=json.dumps({"success": False, "error": str(tool_err)}),

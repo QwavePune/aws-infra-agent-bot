@@ -106,6 +106,10 @@
   font-size: 13px;
 }
 
+.audit-details {
+  white-space: pre-line;
+}
+
 .audit-table th {
   font-size: 12px;
   color: var(--muted);

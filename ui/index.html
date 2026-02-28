@@ -73,6 +73,27 @@
           <div class="status-pill">Live Session</div>
           <div class="status-meta" id="statusMeta">Idle</div>
         </div>
+        <div id="runProgress" class="run-progress hidden-view" aria-live="polite">
+          <span class="run-progress-spinner" aria-hidden="true"></span>
+          <span id="runProgressText">Operation in progress</span>
+          <span id="runProgressTimer" class="run-progress-timer">00:00</span>
+        </div>
+
+        <section class="rail-card mc-flow-card">
+          <div class="mc-flow-header">
+            <h3>Maker-Checker Workflow</h3>
+            <span id="mcTotalItems" class="status-meta">Total Items: 4</span>
+          </div>
+          <div id="mcFlowSteps" class="mc-flow-steps">
+            <button type="button" class="mc-step completed" data-step="1">1. Request Captured</button>
+            <button type="button" class="mc-step current" data-step="2">2. Awaiting Approval</button>
+            <button type="button" class="mc-step pending" data-step="3">3. Approved</button>
+            <button type="button" class="mc-step pending" data-step="4">4. Executed</button>
+          </div>
+          <div class="mc-flow-actions">
+            <button type="button" id="mcExecuteBtn" class="btn-primary hidden-view">Execute Plan</button>
+          </div>
+        </section>
 
         <div class="chat-stream" id="chatStream">
           <div class="message assistant">
@@ -115,6 +136,16 @@
             <li>Create Terraform project</li>
             <li>Run plan then apply</li>
           </ol>
+        </section>
+
+        <section class="rail-card">
+          <h3>Maker-Checker Queue</h3>
+          <p id="mcProfileLabel" class="rail-help">Profile: --</p>
+          <div id="mcQueueActions" class="chip-grid">
+            <button type="button" id="mcRefreshBtn" class="prompt-chip">Refresh Queue</button>
+            <button type="button" id="mcManageRolesBtn" class="prompt-chip">Manage Roles</button>
+          </div>
+          <div id="mcPendingList" class="capabilities-content">No pending approvals.</div>
         </section>
 
         <section class="rail-card capabilities-card">
@@ -213,6 +244,78 @@
         <button id="exportBtn" class="btn-primary">Export Audit Log</button>
       </div>
     </main>
+  </div>
+
+  <div id="mcModal" class="mc-modal hidden-view">
+    <div class="mc-modal-backdrop" data-close="true"></div>
+    <div class="mc-modal-panel">
+      <div class="mc-modal-head">
+        <h3 id="mcModalTitle">Maker-Checker Review</h3>
+        <button type="button" id="mcModalClose" class="btn-secondary">Close</button>
+      </div>
+      <div class="mc-modal-body">
+        <div class="mc-modal-meta" id="mcModalMeta"></div>
+        <h4>Plan Preview</h4>
+        <pre id="mcModalPlan" class="tool-result">Loading...</pre>
+        <h4>Comments</h4>
+        <div id="mcCommentThread" class="mc-comment-thread">No comments yet.</div>
+        <textarea id="mcCommentInput" class="mc-comment-input" rows="3" placeholder="Add comment for maker/checker..."></textarea>
+      </div>
+      <div class="mc-modal-actions">
+        <button type="button" id="mcAddCommentBtn" class="btn-secondary">Add Comment</button>
+        <button type="button" id="mcRejectBtn" class="mc-btn-reject">Reject</button>
+        <button type="button" id="mcApproveBtn" class="mc-btn-approve">Approve</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="awsLoginModal" class="mc-modal hidden-view">
+    <div class="mc-modal-backdrop" data-close-aws-login="true"></div>
+    <div class="mc-modal-panel">
+      <div class="mc-modal-head">
+        <h3>AWS CLI Login</h3>
+        <button type="button" id="awsLoginModalClose" class="btn-secondary">Close</button>
+      </div>
+      <div class="mc-modal-body">
+        <div class="control-grid">
+          <label for="awsProfileSelect">Profile</label>
+          <select id="awsProfileSelect"></select>
+        </div>
+        <p id="awsLoginStatusText" class="rail-help" style="margin-top: 12px;">Choose a profile to start login.</p>
+      </div>
+      <div class="mc-modal-actions">
+        <button type="button" id="awsStartLoginBtn" class="btn-primary">Start Login</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mcRolesModal" class="mc-modal hidden-view">
+    <div class="mc-modal-backdrop" data-close-mc-roles="true"></div>
+    <div class="mc-modal-panel">
+      <div class="mc-modal-head">
+        <h3>Maker-Checker Role Management</h3>
+        <button type="button" id="mcRolesModalClose" class="btn-secondary">Close</button>
+      </div>
+      <div class="mc-modal-body">
+        <p class="rail-help">Assign one or more checker profiles. All other selected profiles can be makers.</p>
+        <div id="mcRolesStatusText" class="mc-modal-meta">Loading role assignments...</div>
+        <div class="mc-roles-grid">
+          <div>
+            <h4>Checker Profiles</h4>
+            <div id="mcCheckerProfilesList" class="mc-role-list">No profiles discovered.</div>
+          </div>
+          <div>
+            <h4>Maker Profiles</h4>
+            <div id="mcMakerProfilesList" class="mc-role-list">No profiles discovered.</div>
+          </div>
+        </div>
+        <h4>IAM Users (Reference)</h4>
+        <div id="mcIamUsersList" class="mc-iam-list">No IAM users available.</div>
+      </div>
+      <div class="mc-modal-actions">
+        <button type="button" id="mcSaveRolesBtn" class="btn-primary">Save Roles</button>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

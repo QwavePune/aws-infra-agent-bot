@@ -5,6 +5,10 @@ import subprocess
 import csv
 import io
 import glob
+import threading
+import configparser
+import shutil
+import hashlib
 from typing import Dict, List, Optional, Any, Iterable, Tuple
 import warnings
 import os
@@ -12,6 +16,8 @@ import logging
 import sys
 import tempfile
 from pathlib import Path
+from datetime import datetime, timezone
+import boto3
 
 # Set up paths dynamically
 # This script is in bin/, so go up one level for APP_ROOT
@@ -30,7 +36,7 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -102,6 +108,458 @@ logger.info("=" * 80)
 
 conversation_store: Dict[str, List] = {}
 llm_cache: Dict[str, object] = {}
+maker_checker_lock = threading.Lock()
+maker_checker_requests: Dict[str, Dict[str, Any]] = {}
+aws_login_lock = threading.Lock()
+aws_login_jobs: Dict[str, Dict[str, Any]] = {}
+aws_login_latest_id: Optional[str] = None
+client_profile_lock = threading.Lock()
+client_active_profiles: Dict[str, str] = {}
+
+os.environ.setdefault("AWS_PROFILE", "default")
+MAKER_CHECKER_CONFIG_PATH = os.path.join(LOG_DIR, "maker_checker_roles.json")
+maker_checker_roles_lock = threading.Lock()
+maker_checker_roles: Dict[str, List[str]] = {"checker_profiles": [], "maker_profiles": []}
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_profile_list(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    values = [v.strip() for v in str(raw).split(",")]
+    return [v for v in values if v]
+
+
+def _normalize_profiles(values: Optional[Iterable[str]]) -> List[str]:
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for item in values or []:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _default_checker_profiles() -> List[str]:
+    env_many = _parse_profile_list(os.environ.get("MAKER_CHECKER_CHECKER_PROFILES"))
+    env_one = _parse_profile_list(os.environ.get("MAKER_CHECKER_CHECKER_PROFILE"))
+    combined = _normalize_profiles(env_many + env_one)
+    if combined:
+        return combined
+    return [os.environ.get("AWS_PROFILE", "default")]
+
+
+def _load_maker_checker_roles() -> Dict[str, List[str]]:
+    checkers: List[str] = []
+    makers: List[str] = []
+    try:
+        if os.path.exists(MAKER_CHECKER_CONFIG_PATH):
+            with open(MAKER_CHECKER_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            checkers = _normalize_profiles(data.get("checker_profiles", []))
+            makers = _normalize_profiles(data.get("maker_profiles", []))
+    except Exception as e:
+        logger.warning(f"Failed to read maker-checker config file '{MAKER_CHECKER_CONFIG_PATH}': {e}")
+
+    if not checkers:
+        checkers = _default_checker_profiles()
+    return {"checker_profiles": checkers, "maker_profiles": makers}
+
+
+def _save_maker_checker_roles(config: Dict[str, List[str]]) -> None:
+    payload = {
+        "checker_profiles": _normalize_profiles(config.get("checker_profiles", [])),
+        "maker_profiles": _normalize_profiles(config.get("maker_profiles", [])),
+        "updated_at": _utc_iso_now(),
+    }
+    with open(MAKER_CHECKER_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _checker_profiles() -> List[str]:
+    with maker_checker_roles_lock:
+        values = list(maker_checker_roles.get("checker_profiles", []))
+    return _normalize_profiles(values) or _default_checker_profiles()
+
+
+def _maker_profiles() -> List[str]:
+    with maker_checker_roles_lock:
+        values = list(maker_checker_roles.get("maker_profiles", []))
+    return _normalize_profiles(values)
+
+
+def _primary_checker_profile() -> str:
+    checkers = _checker_profiles()
+    return checkers[0] if checkers else ""
+
+
+def _is_checker_profile(profile: str) -> bool:
+    return str(profile or "").strip() in set(_checker_profiles())
+
+
+def _is_maker_profile(profile: str) -> bool:
+    p = str(profile or "").strip()
+    if not p:
+        return False
+    makers = set(_maker_profiles())
+    if makers:
+        return p in makers
+    return not _is_checker_profile(p)
+
+
+def _client_key_from_request(request: Optional[Request]) -> str:
+    if not request:
+        return "global"
+    explicit = (request.headers.get("x-agui-client-id") or "").strip()
+    if explicit:
+        return explicit
+    ua = (request.headers.get("user-agent") or "").strip()
+    if ua:
+        return f"ua:{hashlib.sha1(ua.encode('utf-8')).hexdigest()[:16]}"
+    host = (request.client.host if request and request.client else "unknown")
+    return f"ip:{host}"
+
+
+def _current_profile(request: Optional[Request] = None) -> str:
+    if request is not None:
+        key = _client_key_from_request(request)
+        with client_profile_lock:
+            profile = client_active_profiles.get(key)
+        if profile:
+            return profile
+    return os.environ.get("AWS_PROFILE", "default")
+
+
+def _set_client_profile(profile: str, request: Optional[Request] = None, client_key: Optional[str] = None) -> None:
+    key = client_key or _client_key_from_request(request)
+    with client_profile_lock:
+        client_active_profiles[key] = profile
+
+
+def _activate_profile(profile: str) -> None:
+    os.environ["AWS_PROFILE"] = profile
+    os.environ["AWS_DEFAULT_PROFILE"] = profile
+    for env_key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        os.environ.pop(env_key, None)
+    _reset_aws_context()
+
+
+def _extract_user_name_from_arn(arn: str) -> str:
+    if not arn:
+        return "unknown"
+    if ":assumed-role/" in arn:
+        tail = arn.split(":assumed-role/", 1)[1]
+        parts = tail.split("/")
+        if len(parts) >= 2:
+            return parts[1]
+    if ":user/" in arn:
+        return arn.rsplit("/", 1)[-1]
+    if arn.endswith(":root"):
+        return "root"
+    return arn.rsplit("/", 1)[-1]
+
+
+def _reset_aws_context() -> None:
+    """Reset cached boto context so profile changes are picked up reliably."""
+    try:
+        boto3.DEFAULT_SESSION = None
+    except Exception:
+        pass
+    if MCP_AVAILABLE and aws_mcp:
+        aws_mcp.rbac.sts_client = None
+        aws_mcp.rbac.iam_client = None
+        aws_mcp.rbac.identity = None
+
+
+def _list_aws_profiles() -> List[str]:
+    profiles: set[str] = set()
+    aws_config = Path.home() / ".aws" / "config"
+    aws_credentials = Path.home() / ".aws" / "credentials"
+
+    parser = configparser.RawConfigParser()
+    for cfg_path in (aws_config, aws_credentials):
+        if not cfg_path.exists():
+            continue
+        try:
+            parser.read(cfg_path, encoding="utf-8")
+            for section in parser.sections():
+                if section.startswith("profile "):
+                    profiles.add(section.replace("profile ", "", 1).strip())
+                else:
+                    profiles.add(section.strip())
+        except Exception as e:
+            logger.warning(f"Failed reading AWS profile config '{cfg_path}': {e}")
+
+    if not profiles:
+        profiles.add(_current_profile())
+    return sorted(p for p in profiles if p)
+
+
+maker_checker_roles = _load_maker_checker_roles()
+
+
+def _list_iam_users_for_profile(profile: str, limit: int = 200) -> List[str]:
+    if not profile:
+        return []
+    previous = os.environ.get("AWS_PROFILE", "")
+    users: List[str] = []
+    try:
+        _activate_profile(profile)
+        if MCP_AVAILABLE and aws_mcp:
+            aws_mcp.rbac.initialize()
+            client = aws_mcp.rbac.iam_client
+        else:
+            client = boto3.client("iam")
+
+        marker = None
+        while True:
+            kwargs: Dict[str, Any] = {"MaxItems": min(100, max(1, limit))}
+            if marker:
+                kwargs["Marker"] = marker
+            resp = client.list_users(**kwargs)
+            for u in resp.get("Users", []):
+                name = str(u.get("UserName", "")).strip()
+                if name:
+                    users.append(name)
+                    if len(users) >= limit:
+                        return sorted(set(users))
+            if not resp.get("IsTruncated"):
+                break
+            marker = resp.get("Marker")
+            if not marker:
+                break
+    except Exception as e:
+        logger.info(f"Unable to list IAM users for profile '{profile}': {e}")
+    finally:
+        if previous:
+            _activate_profile(previous)
+    return sorted(set(users))
+
+
+def _update_login_job(login_id: str, **fields: Any) -> None:
+    with aws_login_lock:
+        job = aws_login_jobs.get(login_id)
+        if not job:
+            return
+        job.update(fields)
+        job["updated_at"] = _utc_iso_now()
+
+
+def _run_aws_login_job(login_id: str, profile: str, mode: str) -> None:
+    """Background login runner with command fallbacks."""
+    _run_aws_login_job_with_browser(login_id, profile, mode, browser_hint=None, client_key=None)
+
+
+def _detect_browser_hint(user_agent: str) -> Optional[str]:
+    ua = (user_agent or "").lower()
+    if "safari" in ua and "chrome" not in ua and "chromium" not in ua:
+        return "safari"
+    if "chrome" in ua or "chromium" in ua:
+        return "chrome"
+    return None
+
+
+def _browser_env_command(browser_hint: Optional[str]) -> Optional[str]:
+    if not browser_hint:
+        return None
+    if sys.platform != "darwin":
+        return None
+    hint = browser_hint.lower().strip()
+    if hint == "safari":
+        return "/usr/bin/open -a Safari %s"
+    if hint == "chrome":
+        return "/usr/bin/open -a 'Google Chrome' %s"
+    return None
+
+
+def _run_aws_login_job_with_browser(
+    login_id: str,
+    profile: str,
+    mode: str,
+    browser_hint: Optional[str],
+    client_key: Optional[str],
+) -> None:
+    """Background login runner with command fallbacks and browser hinting."""
+    commands: List[List[str]] = []
+    requested_mode = (mode or "auto").lower()
+    if requested_mode in {"auto", "login"}:
+        commands.append(["aws", "login", "--profile", profile])
+    if requested_mode in {"auto", "sso"}:
+        commands.append(["aws", "sso", "login", "--profile", profile])
+
+    last_error = ""
+    browser_cmd = _browser_env_command(browser_hint)
+    cmd_env = os.environ.copy()
+    cmd_env["AWS_PROFILE"] = profile
+    cmd_env["AWS_DEFAULT_PROFILE"] = profile
+    cmd_env["AWS_SDK_LOAD_CONFIG"] = "1"
+    for env_key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        cmd_env.pop(env_key, None)
+        os.environ.pop(env_key, None)
+    if browser_cmd:
+        cmd_env["BROWSER"] = browser_cmd
+
+    for cmd in commands:
+        _update_login_job(login_id, status="running", command=" ".join(cmd), message=f"Running {' '.join(cmd)} ...")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=cmd_env)
+            if proc.returncode == 0:
+                sts_cmd = ["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"]
+                sts_proc = subprocess.run(sts_cmd, capture_output=True, text=True, timeout=30, env=cmd_env)
+                account = ""
+                arn = ""
+                if sts_proc.returncode == 0 and (sts_proc.stdout or "").strip():
+                    try:
+                        ident = json.loads(sts_proc.stdout)
+                        account = str(ident.get("Account", ""))
+                        arn = str(ident.get("Arn", ""))
+                    except Exception:
+                        pass
+                else:
+                    last_error = (sts_proc.stderr or sts_proc.stdout or "Could not verify caller identity after login.").strip()
+                    continue
+
+                _activate_profile(profile)
+                if client_key:
+                    _set_client_profile(profile, client_key=client_key)
+                if MCP_AVAILABLE and aws_mcp:
+                    aws_mcp.rbac.initialize()
+                _update_login_job(
+                    login_id,
+                    status="success",
+                    message=f"Login completed for profile '{profile}'.",
+                    stdout=(proc.stdout or "")[:2000],
+                    stderr=(proc.stderr or "")[:2000],
+                    account=account,
+                    arn=arn,
+                )
+                return
+            last_error = (proc.stderr or proc.stdout or f"exit_code={proc.returncode}").strip()
+        except FileNotFoundError:
+            last_error = "AWS CLI is not installed or not on PATH."
+        except subprocess.TimeoutExpired:
+            last_error = "Login command timed out after 5 minutes."
+        except Exception as e:
+            last_error = str(e)
+
+    _update_login_job(
+        login_id,
+        status="failed",
+        message=f"Failed to login profile '{profile}'.",
+        error=last_error or "Unknown login error.",
+    )
+
+
+def _maker_checker_should_gate(tool_name: str, mcp_server: Optional[str], active_profile: Optional[str] = None) -> bool:
+    if mcp_server != "aws_terraform":
+        return False
+    if not is_mutating_tool(tool_name):
+        return False
+    effective_profile = active_profile or _current_profile()
+    if not _checker_profiles():
+        return False
+    return not _is_checker_profile(effective_profile)
+
+
+def _create_maker_checker_request(
+    run_id: str,
+    thread_id: str,
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    mcp_server: str,
+    requester_message: str = "",
+    requester_profile: Optional[str] = None,
+) -> Dict[str, Any]:
+    request_id = f"mc-{uuid.uuid4().hex[:12]}"
+    effective_requester = requester_profile or _current_profile()
+    comments: List[Dict[str, Any]] = []
+    if requester_message:
+        comments.append({
+            "timestamp": _utc_iso_now(),
+            "author_profile": effective_requester,
+            "author_role": "maker",
+            "message": requester_message,
+        })
+    item = {
+        "request_id": request_id,
+        "created_at": _utc_iso_now(),
+        "updated_at": _utc_iso_now(),
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "requester_profile": effective_requester,
+        "checker_profiles": _checker_profiles(),
+        "checker_profile": _primary_checker_profile(),
+        "tool_name": tool_name,
+        "tool_args": tool_args or {},
+        "mcp_server": mcp_server,
+        "status": "pending",
+        "approval_notes": "",
+        "approved_at": None,
+        "rejected_at": None,
+        "executed_at": None,
+        "plan_preview": "",
+        "execution_result": None,
+        "execution_error": None,
+        "comments": comments,
+    }
+    item["plan_preview"] = _build_maker_checker_plan_preview(item)
+    with maker_checker_lock:
+        maker_checker_requests[request_id] = item
+    return item
+
+
+def _list_maker_checker_requests(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    with maker_checker_lock:
+        values = list(maker_checker_requests.values())
+    if status:
+        values = [v for v in values if str(v.get("status", "")).lower() == status.lower()]
+    values.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return values
+
+
+def _maker_checker_copy(item: Dict[str, Any]) -> Dict[str, Any]:
+    return json.loads(json.dumps(item, default=str))
+
+
+def _build_maker_checker_plan_preview(item: Dict[str, Any]) -> str:
+    tool_name = item.get("tool_name", "")
+    tool_args = item.get("tool_args", {}) or {}
+
+    if tool_name in {"terraform_apply", "terraform_destroy"}:
+        project_name = tool_args.get("project_name")
+        if project_name and aws_mcp:
+            tfplan = aws_mcp.terraform.workspace_dir / project_name / "tfplan"
+            if tfplan.exists():
+                cmd = ["terraform", "-chdir", str(aws_mcp.terraform.workspace_dir / project_name), "show", "tfplan"]
+                try:
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        return proc.stdout[:12000]
+                    if proc.stderr.strip():
+                        return f"Unable to render tfplan preview: {proc.stderr[:1000]}"
+                except Exception as e:
+                    return f"Unable to render tfplan preview: {str(e)}"
+            return f"No tfplan file found for project '{project_name}'."
+        return "No project_name supplied to render terraform plan preview."
+
+    if tool_name.startswith("create_"):
+        return (
+            "Planned tool request (pre-Terraform plan):\n"
+            f"tool: {tool_name}\n"
+            f"arguments: {json.dumps(tool_args, indent=2, default=str)}\n"
+            "Note: terraform plan will be available after project creation in execution stage."
+        )
+
+    return (
+        "Planned request preview:\n"
+        f"tool: {tool_name}\n"
+        f"arguments: {json.dumps(tool_args, indent=2, default=str)}"
+    )
 
 
 def _audit_is_mutating_tool(tool_name: str) -> bool:
@@ -162,15 +620,15 @@ def _audit_extract_resource(tool_name: str, tool_args: Dict[str, Any], tool_resu
 
 def _audit_extract_details(tool_result: Dict[str, Any]) -> str:
     if not isinstance(tool_result, dict):
-        return str(tool_result)[:240]
+        return str(tool_result)[:600]
     if tool_result.get("error"):
-        return str(tool_result.get("error"))[:240]
+        return str(tool_result.get("error"))[:600]
     if tool_result.get("message"):
-        return str(tool_result.get("message"))[:240]
+        return str(tool_result.get("message"))[:600]
     for key in ("stdout", "details"):
         value = tool_result.get(key)
         if value:
-            return str(value).replace("\n", " ")[:240]
+            return str(value).replace("\n", " ")[:600]
     return "tool executed"
 
 
@@ -240,9 +698,45 @@ def _collect_audit_entries(
                 "action": tool_name,
                 "resource": _audit_extract_resource(tool_name, tool_args, {}),
                 "status": failed_status,
-                "details": str(details)[:240],
+                "details": str(details)[:600],
                 "tool_args": tool_args,
             })
+
+    # Include maker-checker approval/execution timeline in audit list.
+    for item in _list_maker_checker_requests():
+        comments = item.get("comments", []) or []
+        comment_lines = [
+            f"{c.get('author_role', 'user')}({c.get('author_profile', 'unknown')}): {c.get('message', '')}"
+            for c in comments[-4:]
+        ]
+        details = " | ".join(comment_lines) if comment_lines else ""
+        if item.get("execution_error"):
+            details = f"{details} | exec_error: {item.get('execution_error')}".strip(" |")
+        elif item.get("execution_result"):
+            result = item.get("execution_result") or {}
+            result_excerpt = ""
+            if isinstance(result, dict):
+                result_excerpt = (
+                    str(result.get("stdout") or result.get("message") or result.get("error") or "")
+                    .replace("\n", " ")
+                    .strip()
+                )
+            details = f"{details} | execution completed | {result_excerpt}".strip(" |")
+        elif item.get("approval_notes"):
+            details = f"{details} | approval: {item.get('approval_notes')}".strip(" |")
+
+        entries.append({
+            "timestamp": item.get("updated_at") or item.get("created_at"),
+            "run_id": item.get("run_id"),
+            "thread_id": item.get("thread_id"),
+            "user": item.get("requester_profile", "unknown"),
+            "cloud": "aws",
+            "action": f"maker_checker:{item.get('tool_name', 'unknown')}",
+            "resource": _audit_extract_resource(item.get("tool_name", ""), item.get("tool_args", {}), item.get("execution_result") or {}),
+            "status": item.get("status", "pending"),
+            "details": details[:1400] or "maker-checker workflow",
+            "tool_args": item.get("tool_args", {}),
+        })
 
     entries.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
 
@@ -449,8 +943,23 @@ class MCPToolRequest(BaseModel):
     mcpServer: Optional[str] = "aws_terraform"
 
 
+class MakerCheckerDecisionRequest(BaseModel):
+    request_id: str
+    notes: Optional[str] = None
+
+
+class MakerCheckerCommentRequest(BaseModel):
+    request_id: str
+    message: str
+
+
+class MakerCheckerRolesUpdateRequest(BaseModel):
+    checker_profiles: Optional[List[str]] = None
+    maker_profiles: Optional[List[str]] = None
+
+
 @app.post("/api/mcp/execute")
-async def execute_mcp_tool(request: MCPToolRequest):
+async def execute_mcp_tool(request: MCPToolRequest, http_request: Request):
     """Execute an MCP tool"""
     logger.info(f"API Request: POST /api/mcp/execute - Server: {request.mcpServer}, Tool: {request.tool_name}")
     logger.info(f"Parameters: {request.parameters}")
@@ -463,6 +972,7 @@ async def execute_mcp_tool(request: MCPToolRequest):
         })
     
     try:
+        _activate_profile(_current_profile(http_request))
         result = mcp_server.execute_tool(request.tool_name, request.parameters)
         logger.info(f"MCP tool execution result: {result.get('success', False)}")
         return JSONResponse(result)
@@ -472,6 +982,271 @@ async def execute_mcp_tool(request: MCPToolRequest):
             "success": False,
             "error": str(e)
         })
+
+
+@app.get("/api/maker-checker/config")
+async def maker_checker_config(request: Request):
+    pending = len(_list_maker_checker_requests(status="pending"))
+    current = _current_profile(request)
+    checkers = _checker_profiles()
+    makers = _maker_profiles()
+    return JSONResponse({
+        "checker_profile": checkers[0] if checkers else "",
+        "checker_profiles": checkers,
+        "maker_profiles": makers,
+        "current_profile": current,
+        "is_checker": _is_checker_profile(current),
+        "is_maker": _is_maker_profile(current),
+        "pending_count": pending,
+    })
+
+
+@app.get("/api/maker-checker/roles")
+async def maker_checker_roles_config(request: Request):
+    profiles = _list_aws_profiles()
+    current = _current_profile(request)
+    checkers = _checker_profiles()
+    makers = _maker_profiles()
+    iam_users = _list_iam_users_for_profile(current, limit=200) if current else []
+    return JSONResponse({
+        "profiles": profiles,
+        "iam_users": iam_users,
+        "checker_profiles": checkers,
+        "maker_profiles": makers,
+        "current_profile": current,
+        "is_checker": _is_checker_profile(current),
+        "is_maker": _is_maker_profile(current),
+    })
+
+
+@app.post("/api/maker-checker/roles")
+async def update_maker_checker_roles(payload: MakerCheckerRolesUpdateRequest):
+    available_profiles = _list_aws_profiles()
+    incoming_checkers = _normalize_profiles(payload.checker_profiles or [])
+    incoming_makers = _normalize_profiles(payload.maker_profiles or [])
+    if not incoming_checkers:
+        return JSONResponse({"success": False, "error": "At least one checker profile is required."})
+
+    unknown = [p for p in incoming_checkers + incoming_makers if p not in available_profiles]
+    if unknown:
+        return JSONResponse({
+            "success": False,
+            "error": f"Unknown profile(s): {', '.join(unknown)}",
+        })
+
+    if not incoming_makers:
+        incoming_makers = [p for p in available_profiles if p not in incoming_checkers]
+    else:
+        incoming_makers = [p for p in incoming_makers if p not in incoming_checkers]
+
+    new_config = {
+        "checker_profiles": incoming_checkers,
+        "maker_profiles": incoming_makers,
+    }
+    with maker_checker_roles_lock:
+        maker_checker_roles["checker_profiles"] = list(incoming_checkers)
+        maker_checker_roles["maker_profiles"] = list(incoming_makers)
+    _save_maker_checker_roles(new_config)
+
+    return JSONResponse({
+        "success": True,
+        "checker_profiles": incoming_checkers,
+        "maker_profiles": incoming_makers,
+    })
+
+
+@app.get("/api/maker-checker/requests")
+async def maker_checker_requests_api(status: Optional[str] = Query(default=None)):
+    return JSONResponse({"requests": _list_maker_checker_requests(status=status)})
+
+
+@app.get("/api/maker-checker/request/{request_id}")
+async def maker_checker_request_detail(request_id: str):
+    with maker_checker_lock:
+        item = maker_checker_requests.get(request_id)
+        if not item:
+            return JSONResponse({"success": False, "error": f"Request '{request_id}' not found."})
+        return JSONResponse({"success": True, "request": _maker_checker_copy(item)})
+
+
+@app.post("/api/maker-checker/comment")
+async def maker_checker_add_comment(request: Request, payload: MakerCheckerCommentRequest):
+    message = (payload.message or "").strip()
+    if not message:
+        return JSONResponse({"success": False, "error": "message is required"})
+
+    with maker_checker_lock:
+        item = maker_checker_requests.get(payload.request_id)
+        if not item:
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' not found."})
+        role = "checker" if _is_checker_profile(_current_profile(request)) else "maker"
+        item.setdefault("comments", []).append({
+            "timestamp": _utc_iso_now(),
+            "author_profile": _current_profile(request),
+            "author_role": role,
+            "message": message,
+        })
+        item["updated_at"] = _utc_iso_now()
+        updated = _maker_checker_copy(item)
+
+    workflow_event(
+        workflow_logger,
+        "maker_checker_comment_added",
+        source="agui",
+        run_id=item.get("run_id"),
+        thread_id=item.get("thread_id"),
+        request_id=item.get("request_id"),
+        metadata={"class": "MakerChecker", "method": "comment"},
+    )
+    return JSONResponse({"success": True, "request": updated})
+
+
+@app.post("/api/maker-checker/approve")
+async def approve_maker_checker_request(request: Request, payload: MakerCheckerDecisionRequest):
+    current = _current_profile(request)
+    if not _is_checker_profile(current):
+        return JSONResponse({
+            "success": False,
+            "error": f"Approval requires checker profile ({', '.join(_checker_profiles())}). Current profile is '{current}'.",
+        })
+
+    with maker_checker_lock:
+        item = maker_checker_requests.get(payload.request_id)
+        if not item:
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' not found."})
+        if item.get("status") != "pending":
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' is not pending."})
+        item["status"] = "approved"
+        item["approval_notes"] = payload.notes or ""
+        item["approved_at"] = _utc_iso_now()
+        item["updated_at"] = _utc_iso_now()
+        if payload.notes:
+            item.setdefault("comments", []).append({
+                "timestamp": _utc_iso_now(),
+                "author_profile": _current_profile(request),
+                "author_role": "checker",
+                "message": payload.notes,
+            })
+        updated = _maker_checker_copy(item)
+
+    workflow_event(
+        workflow_logger,
+        "maker_checker_request_approved",
+        source="agui",
+        run_id=item.get("run_id"),
+        thread_id=item.get("thread_id"),
+        request_id=item.get("request_id"),
+        tool_name=item.get("tool_name"),
+        metadata={"class": "MakerChecker", "method": "approve"},
+    )
+    return JSONResponse({"success": True, "request": updated})
+
+
+@app.post("/api/maker-checker/reject")
+async def reject_maker_checker_request(request: Request, payload: MakerCheckerDecisionRequest):
+    current = _current_profile(request)
+    if not _is_checker_profile(current):
+        return JSONResponse({
+            "success": False,
+            "error": f"Rejection requires checker profile ({', '.join(_checker_profiles())}). Current profile is '{current}'.",
+        })
+
+    with maker_checker_lock:
+        item = maker_checker_requests.get(payload.request_id)
+        if not item:
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' not found."})
+        if item.get("status") != "pending":
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' is not pending."})
+        item["status"] = "rejected"
+        item["approval_notes"] = payload.notes or ""
+        item["rejected_at"] = _utc_iso_now()
+        item["updated_at"] = _utc_iso_now()
+        if payload.notes:
+            item.setdefault("comments", []).append({
+                "timestamp": _utc_iso_now(),
+                "author_profile": _current_profile(request),
+                "author_role": "checker",
+                "message": payload.notes,
+            })
+        updated = _maker_checker_copy(item)
+
+    workflow_event(
+        workflow_logger,
+        "maker_checker_request_rejected",
+        source="agui",
+        run_id=item.get("run_id"),
+        thread_id=item.get("thread_id"),
+        request_id=item.get("request_id"),
+        tool_name=item.get("tool_name"),
+        metadata={"class": "MakerChecker", "method": "reject"},
+    )
+    return JSONResponse({"success": True, "request": updated})
+
+
+@app.post("/api/maker-checker/execute")
+async def execute_maker_checker_request(request: Request, payload: MakerCheckerDecisionRequest):
+    with maker_checker_lock:
+        item = maker_checker_requests.get(payload.request_id)
+        if not item:
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' not found."})
+        if item.get("status") != "approved":
+            return JSONResponse({"success": False, "error": f"Request '{payload.request_id}' is not approved yet."})
+        item["status"] = "executing"
+        item["updated_at"] = _utc_iso_now()
+        if payload.notes:
+            role = "checker" if _is_checker_profile(_current_profile(request)) else "maker"
+            item.setdefault("comments", []).append({
+                "timestamp": _utc_iso_now(),
+                "author_profile": _current_profile(request),
+                "author_role": role,
+                "message": payload.notes,
+            })
+
+    selected_mcp = get_mcp_server(item.get("mcp_server"))
+    if not selected_mcp:
+        with maker_checker_lock:
+            item["status"] = "failed"
+            item["execution_error"] = f"MCP server '{item.get('mcp_server')}' not available."
+            item["updated_at"] = _utc_iso_now()
+            failed = _maker_checker_copy(item)
+        return JSONResponse({"success": False, "error": failed["execution_error"], "request": failed})
+
+    previous_profile = _current_profile(request)
+    checker_target = _primary_checker_profile()
+    if checker_target:
+        _activate_profile(checker_target)
+    try:
+        if MCP_AVAILABLE and aws_mcp:
+            aws_mcp.rbac.initialize()
+        result = selected_mcp.execute_tool(item["tool_name"], item.get("tool_args", {}))
+    except Exception as e:
+        result = {"success": False, "error": str(e)}
+    finally:
+        _activate_profile(previous_profile)
+        if MCP_AVAILABLE and aws_mcp:
+            aws_mcp.rbac.initialize()
+
+    with maker_checker_lock:
+        item["execution_result"] = result
+        item["executed_at"] = _utc_iso_now()
+        item["updated_at"] = _utc_iso_now()
+        item["status"] = "executed" if result.get("success", False) else "failed"
+        if not result.get("success", False):
+            item["execution_error"] = result.get("error") or "Execution failed."
+        updated = _maker_checker_copy(item)
+
+    workflow_event(
+        workflow_logger,
+        "maker_checker_request_executed",
+        source="agui",
+        run_id=item.get("run_id"),
+        thread_id=item.get("thread_id"),
+        request_id=item.get("request_id"),
+        tool_name=item.get("tool_name"),
+        status=item.get("status"),
+        metadata={"class": "MakerChecker", "method": "execute"},
+    )
+    return JSONResponse({"success": True, "request": updated})
 
 
 @app.get("/api/env")
@@ -488,13 +1263,15 @@ async def get_env():
 
 
 @app.get("/api/aws/identity")
-async def get_aws_identity():
+async def get_aws_identity(request: Request):
     """Get current AWS identity and check if session is active"""
     logger.info("API Request: GET /api/aws/identity")
     if not MCP_AVAILABLE or aws_mcp is None:
         return JSONResponse({"active": False, "error": "MCP not available"})
     
     try:
+        active_profile = _current_profile(request)
+        _activate_profile(active_profile)
         # Re-initialize to catch new credentials
         aws_mcp.rbac.initialize()
         info = aws_mcp.rbac.get_user_info()
@@ -503,16 +1280,18 @@ async def get_aws_identity():
              return JSONResponse({
                 "active": False,
                 "error": info["error"],
-                "profile": os.environ.get("AWS_PROFILE", "default")
+                "profile": active_profile
             })
 
         regions = aws_mcp.rbac.get_allowed_regions()
+        arn = info.get("user_arn")
         return JSONResponse({
             "active": True,
             "account": info.get("account_id"),
-            "arn": info.get("user_arn"),
+            "arn": arn,
+            "user_name": _extract_user_name_from_arn(arn),
             "regions": regions,
-            "profile": os.environ.get("AWS_PROFILE", "default")
+            "profile": active_profile
         })
     except Exception as e:
         logger.warning(f"Failed to get AWS identity: {e}")
@@ -523,45 +1302,92 @@ async def get_aws_identity():
 
 
 @app.post("/api/aws/profile")
-async def set_aws_profile(payload: Dict[str, str]):
+async def set_aws_profile(request: Request, payload: Dict[str, str]):
     """Set the active AWS profile for the server process"""
-    profile = payload.get("profile", "default")
+    profile = payload.get("profile", _current_profile(request))
     logger.info(f"API Request: POST /api/aws/profile - New Profile: {profile}")
-    os.environ["AWS_PROFILE"] = profile
+    _set_client_profile(profile, request=request)
+    _activate_profile(profile)
     
     # Force re-initialization of MCP
     if MCP_AVAILABLE and aws_mcp:
         aws_mcp.rbac.initialize()
         
-    return JSONResponse({"success": True, "profile": profile})
+    return JSONResponse({"success": True, "profile": profile, "client_key": _client_key_from_request(request)})
+
+
+@app.get("/api/aws/profiles")
+async def list_aws_profiles(request: Request):
+    """List available AWS CLI profiles discovered from ~/.aws config."""
+    profiles = _list_aws_profiles()
+    return JSONResponse({
+        "profiles": profiles,
+        "current_profile": _current_profile(request),
+        "checker_profile": _primary_checker_profile(),
+        "checker_profiles": _checker_profiles(),
+        "maker_profiles": _maker_profiles(),
+    })
 
 
 @app.post("/api/aws/login")
-async def trigger_aws_login(payload: Dict[str, str] = None):
-    """Trigger 'aws sso login' for the configured profile"""
-    profile = (payload or {}).get("profile") or os.environ.get("AWS_PROFILE", "default")
-    logger.info(f"API Request: POST /api/aws/login - Profile: {profile}")
-    try:
-        # Use subprocess to run the login command
-        # Removing pipes allows the command to better interact with the OS browser launcher
-        process = subprocess.Popen(
-            ["aws", "sso", "login", "--profile", profile]
-        )
-        return JSONResponse({
-            "success": True,
-            "message": "AWS CLI Login triggered."
-        })
-    except Exception as e:
-        # Fallback to standard configure if SSO login fails
-        try:
-             # Try simple identity check first
-             return JSONResponse({
-                "success": False, 
-                "error": f"Failed to trigger login: {str(e)}. Please run 'aws configure' in your terminal."
-            })
-        except:
-             pass
-        return JSONResponse({"success": False, "error": str(e)})
+async def trigger_aws_login(request: Request, payload: Dict[str, str] = None):
+    """Start AWS login flow and track status for UI polling callback."""
+    global aws_login_latest_id
+    profile = (payload or {}).get("profile") or _current_profile(request)
+    mode = (payload or {}).get("mode", "auto")
+    browser_hint = (payload or {}).get("browser") or _detect_browser_hint(request.headers.get("user-agent", ""))
+    client_key = _client_key_from_request(request)
+    logger.info(f"API Request: POST /api/aws/login - Profile: {profile}, Mode: {mode}, Browser Hint: {browser_hint or 'default'}")
+
+    if not shutil.which("aws"):
+        return JSONResponse({"success": False, "error": "AWS CLI not found. Install AWS CLI v2 and retry."})
+
+    login_id = f"login-{uuid.uuid4().hex[:10]}"
+    job = {
+        "login_id": login_id,
+        "profile": profile,
+        "mode": mode,
+        "status": "queued",
+        "message": f"Starting login for profile '{profile}'...",
+        "command": "",
+        "error": "",
+        "stdout": "",
+        "stderr": "",
+        "created_at": _utc_iso_now(),
+        "updated_at": _utc_iso_now(),
+        "browser_hint": browser_hint or "",
+        "account": "",
+        "arn": "",
+        "client_key": client_key,
+    }
+    with aws_login_lock:
+        aws_login_jobs[login_id] = job
+        aws_login_latest_id = login_id
+
+    t = threading.Thread(
+        target=_run_aws_login_job_with_browser,
+        args=(login_id, profile, mode, browser_hint, client_key),
+        daemon=True,
+    )
+    t.start()
+    return JSONResponse({
+        "success": True,
+        "login_id": login_id,
+        "status": "queued",
+        "message": "Login started. Browser should open for AWS authentication.",
+    })
+
+
+@app.get("/api/aws/login/status")
+async def aws_login_status(login_id: Optional[str] = Query(default=None)):
+    lookup_id = login_id
+    with aws_login_lock:
+        if not lookup_id:
+            lookup_id = aws_login_latest_id
+        job = aws_login_jobs.get(lookup_id) if lookup_id else None
+    if not job:
+        return JSONResponse({"success": False, "error": "No login job found."})
+    return JSONResponse({"success": True, "job": job})
 
 
 def get_llm(provider: str, model: Optional[str], credential_source: Optional[str], mcp_server_name: Optional[str] = "none"):
@@ -597,7 +1423,7 @@ def now_ms() -> int:
 
 
 @app.post("/api/run")
-async def run_agent(payload: RunRequest):
+async def run_agent(payload: RunRequest, request: Request):
     logger.info("=" * 80)
     logger.info("API Request: POST /api/run - New user query received")
     logger.info(f"Provider: {payload.provider}, Model: {payload.model or 'default'}")
@@ -605,6 +1431,8 @@ async def run_agent(payload: RunRequest):
     logger.info(f"Thread ID: {payload.threadId}")
     logger.info(f"MCP Server: {payload.mcpServer}")
     logger.info(f"Message Length: {len(payload.message)} characters")
+    active_profile = _current_profile(request)
+    _activate_profile(active_profile)
     
     if not payload.message.strip():
         logger.warning("Request rejected: Empty message")
@@ -937,6 +1765,64 @@ async def run_agent(payload: RunRequest):
                                     "success": False,
                                     "error": f"Blocked mutating tool '{tool_name}' because user intent is read-only. Use discovery/list tools instead."
                                 }),
+                                tool_call_id=tool_call_id
+                            ))
+                            continue
+
+                        if _maker_checker_should_gate(tool_name, payload.mcpServer, active_profile=active_profile):
+                            request_item = _create_maker_checker_request(
+                                run_id=run_id,
+                                thread_id=thread_id,
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                mcp_server=payload.mcpServer or "aws_terraform",
+                                requester_message=payload.message,
+                                requester_profile=active_profile,
+                            )
+                            workflow_event(
+                                workflow_logger,
+                                "maker_checker_request_created",
+                                source="agui",
+                                run_id=run_id,
+                                thread_id=thread_id,
+                                request_id=request_item["request_id"],
+                                tool_name=tool_name,
+                                metadata={"class": "MakerChecker", "method": "queue"},
+                            )
+                            queued_result = {
+                                "success": True,
+                                "queued_for_approval": True,
+                                "request_id": request_item["request_id"],
+                                "checker_profile": request_item["checker_profile"],
+                                "message": (
+                                    f"Request queued for checker approval. "
+                                    f"Switch to profile '{request_item['checker_profile']}' to approve."
+                                ),
+                            }
+                            forced_followup_text = queued_result["message"]
+
+                            yield sse_event({
+                                "type": "MAKER_CHECKER_REQUEST",
+                                "request": request_item,
+                                "timestamp": now_ms(),
+                            })
+                            yield sse_event({
+                                "type": "MAKER_CHECKER_STATUS",
+                                "workflow": {
+                                    "total": 4,
+                                    "current": 2,
+                                    "steps": [
+                                        {"name": "Request Captured", "state": "completed"},
+                                        {"name": "Awaiting Approval", "state": "current"},
+                                        {"name": "Approved", "state": "pending"},
+                                        {"name": "Executed", "state": "pending"},
+                                    ],
+                                },
+                                "timestamp": now_ms(),
+                            })
+
+                            history.append(ToolMessage(
+                                content=json.dumps(queued_result),
                                 tool_call_id=tool_call_id
                             ))
                             continue

@@ -50,9 +50,9 @@ const formatTimestamp = (iso) => {
 
 const renderStatus = (status) => {
   const safe = escapeHtml(status || "unknown");
-  const cls = safe === "success"
+  const cls = (safe === "success" || safe === "executed")
     ? "audit-status-success"
-    : safe === "failed"
+    : (safe === "failed" || safe === "rejected")
       ? "audit-status-failed"
       : "audit-status-blocked";
   return `<span class="audit-status-pill ${cls}">${safe}</span>`;
@@ -98,7 +98,7 @@ const renderTable = (entries) => {
       <td class="audit-mono">${escapeHtml(entry.action)}</td>
       <td class="audit-mono">${escapeHtml(entry.resource)}</td>
       <td>${renderStatus(entry.status)}</td>
-      <td>${escapeHtml(entry.details)}</td>
+      <td class="audit-details">${escapeHtml((entry.details || "").replaceAll(" | ", "\n"))}</td>
     </tr>
   `).join("");
   entryCount.textContent = `Showing ${entries.length} entr${entries.length === 1 ? "y" : "ies"}`;
@@ -162,3 +162,7 @@ exportBtn.addEventListener("click", () => {
 fetchAuditLogs().catch((err) => {
   tableBody.innerHTML = `<tr><td colspan="7">${escapeHtml(err.message)}</td></tr>`;
 });
+
+setInterval(() => {
+  fetchAuditLogs().catch(() => {});
+}, 12000);

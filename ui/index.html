@@ -38,6 +38,12 @@
               <option value="aws_terraform" selected>AWS Infrastructure (Terraform)</option>
               <option value="azure_terraform">Azure Infrastructure (Terraform)</option>
             </select>
+
+            <label for="toolOutputSelect">Output Mode</label>
+            <select id="toolOutputSelect">
+              <option value="text-only" selected>Text Only</option>
+              <option value="full-tool-output">Full Tool Output</option>
+            </select>
           </div>
         </section>
 
@@ -54,9 +60,6 @@
           <div id="quickActions" class="chip-grid">
             <button type="button" class="prompt-chip" data-prompt="What can you do for me?">Capabilities</button>
             <button type="button" class="prompt-chip" data-prompt="List all AWS resources in my account">Inventory</button>
-            <button type="button" class="prompt-chip" data-prompt="Start ECS deployment workflow in ap-south-1">Start ECS Flow</button>
-            <button type="button" class="prompt-chip" data-prompt="Review my current ECS deployment workflow">Review ECS</button>
-            <button type="button" class="prompt-chip" data-prompt="Run terraform_plan for my last project">Terraform Plan</button>
             <button type="button" class="prompt-chip" data-prompt="Show my current AWS identity and permissions">Who Am I</button>
           </div>
         </section>
@@ -126,16 +129,6 @@
             <div class="stat-label">Latency</div>
             <div class="stat-value" id="latencyLabel">--</div>
           </div>
-        </section>
-
-        <section class="rail-card">
-          <h3 id="workflowTitle">Guided Workflow</h3>
-          <ol id="workflowList" class="workflow-list">
-            <li>Start workflow and collect requirements</li>
-            <li>Validate IDs, roles, and region prerequisites</li>
-            <li>Create Terraform project</li>
-            <li>Run plan then apply</li>
-          </ol>
         </section>
 
         <section class="rail-card">
@@ -282,8 +275,11 @@
           <select id="awsProfileSelect"></select>
         </div>
         <p id="awsLoginStatusText" class="rail-help" style="margin-top: 12px;">Choose a profile to start login.</p>
+        <div class="mc-modal-meta" id="awsDiagnosticsMeta">Diagnostics unavailable.</div>
+        <pre id="awsDiagnosticsPanel" class="tool-result">No diagnostics yet.</pre>
       </div>
       <div class="mc-modal-actions">
+        <button type="button" id="awsRunDiagnosticsBtn" class="btn-secondary">Run Diagnostics</button>
         <button type="button" id="awsStartLoginBtn" class="btn-primary">Start Login</button>
       </div>
     </div>

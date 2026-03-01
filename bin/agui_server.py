@@ -9,6 +9,7 @@ import threading
 import configparser
 import shutil
 import hashlib
+import re
 from typing import Dict, List, Optional, Any, Iterable, Tuple
 import warnings
 import os
@@ -110,9 +111,6 @@ conversation_store: Dict[str, List] = {}
 llm_cache: Dict[str, object] = {}
 maker_checker_lock = threading.Lock()
 maker_checker_requests: Dict[str, Dict[str, Any]] = {}
-aws_login_lock = threading.Lock()
-aws_login_jobs: Dict[str, Dict[str, Any]] = {}
-aws_login_latest_id: Optional[str] = None
 client_profile_lock = threading.Lock()
 client_active_profiles: Dict[str, str] = {}
 
@@ -300,6 +298,41 @@ def _list_aws_profiles() -> List[str]:
     return sorted(p for p in profiles if p)
 
 
+def _read_aws_config() -> configparser.RawConfigParser:
+    parser = configparser.RawConfigParser()
+    for cfg_path in (Path.home() / ".aws" / "config", Path.home() / ".aws" / "credentials"):
+        if cfg_path.exists():
+            parser.read(cfg_path, encoding="utf-8")
+    return parser
+
+
+def _aws_profile_section(parser: configparser.RawConfigParser, profile: str) -> Optional[str]:
+    section = f"profile {profile}"
+    if parser.has_section(section):
+        return section
+    if parser.has_section(profile):
+        return profile
+    return None
+
+
+def _profile_settings(profile: str) -> Dict[str, str]:
+    parser = _read_aws_config()
+    section = _aws_profile_section(parser, profile)
+    if not section:
+        return {}
+    return {k: v for k, v in parser.items(section)}
+
+
+def _resolve_login_profile(profile: str) -> str:
+    settings = _profile_settings(profile)
+    credential_process = settings.get("credential_process", "")
+    if credential_process:
+        match = re.search(r"--profile\s+([A-Za-z0-9_.@\-]+)", credential_process)
+        if match:
+            return match.group(1).strip()
+    return profile
+
+
 maker_checker_roles = _load_maker_checker_roles()
 
 
@@ -341,118 +374,24 @@ def _list_iam_users_for_profile(profile: str, limit: int = 200) -> List[str]:
     return sorted(set(users))
 
 
-def _update_login_job(login_id: str, **fields: Any) -> None:
-    with aws_login_lock:
-        job = aws_login_jobs.get(login_id)
-        if not job:
-            return
-        job.update(fields)
-        job["updated_at"] = _utc_iso_now()
-
-
-def _run_aws_login_job(login_id: str, profile: str, mode: str) -> None:
-    """Background login runner with command fallbacks."""
-    _run_aws_login_job_with_browser(login_id, profile, mode, browser_hint=None, client_key=None)
-
-
-def _detect_browser_hint(user_agent: str) -> Optional[str]:
-    ua = (user_agent or "").lower()
-    if "safari" in ua and "chrome" not in ua and "chromium" not in ua:
-        return "safari"
-    if "chrome" in ua or "chromium" in ua:
-        return "chrome"
-    return None
-
-
-def _browser_env_command(browser_hint: Optional[str]) -> Optional[str]:
-    if not browser_hint:
-        return None
-    if sys.platform != "darwin":
-        return None
-    hint = browser_hint.lower().strip()
-    if hint == "safari":
-        return "/usr/bin/open -a Safari %s"
-    if hint == "chrome":
-        return "/usr/bin/open -a 'Google Chrome' %s"
-    return None
-
-
-def _run_aws_login_job_with_browser(
-    login_id: str,
-    profile: str,
-    mode: str,
-    browser_hint: Optional[str],
-    client_key: Optional[str],
-) -> None:
-    """Background login runner with command fallbacks and browser hinting."""
-    commands: List[List[str]] = []
-    requested_mode = (mode or "auto").lower()
-    if requested_mode in {"auto", "login"}:
-        commands.append(["aws", "login", "--profile", profile])
-    if requested_mode in {"auto", "sso"}:
-        commands.append(["aws", "sso", "login", "--profile", profile])
-
-    last_error = ""
-    browser_cmd = _browser_env_command(browser_hint)
+def _cli_get_caller_identity(profile: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not profile or not shutil.which("aws"):
+        return None, "AWS CLI not available."
     cmd_env = os.environ.copy()
     cmd_env["AWS_PROFILE"] = profile
     cmd_env["AWS_DEFAULT_PROFILE"] = profile
     cmd_env["AWS_SDK_LOAD_CONFIG"] = "1"
     for env_key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
         cmd_env.pop(env_key, None)
-        os.environ.pop(env_key, None)
-    if browser_cmd:
-        cmd_env["BROWSER"] = browser_cmd
-
-    for cmd in commands:
-        _update_login_job(login_id, status="running", command=" ".join(cmd), message=f"Running {' '.join(cmd)} ...")
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=cmd_env)
-            if proc.returncode == 0:
-                sts_cmd = ["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"]
-                sts_proc = subprocess.run(sts_cmd, capture_output=True, text=True, timeout=30, env=cmd_env)
-                account = ""
-                arn = ""
-                if sts_proc.returncode == 0 and (sts_proc.stdout or "").strip():
-                    try:
-                        ident = json.loads(sts_proc.stdout)
-                        account = str(ident.get("Account", ""))
-                        arn = str(ident.get("Arn", ""))
-                    except Exception:
-                        pass
-                else:
-                    last_error = (sts_proc.stderr or sts_proc.stdout or "Could not verify caller identity after login.").strip()
-                    continue
-
-                _activate_profile(profile)
-                if client_key:
-                    _set_client_profile(profile, client_key=client_key)
-                if MCP_AVAILABLE and aws_mcp:
-                    aws_mcp.rbac.initialize()
-                _update_login_job(
-                    login_id,
-                    status="success",
-                    message=f"Login completed for profile '{profile}'.",
-                    stdout=(proc.stdout or "")[:2000],
-                    stderr=(proc.stderr or "")[:2000],
-                    account=account,
-                    arn=arn,
-                )
-                return
-            last_error = (proc.stderr or proc.stdout or f"exit_code={proc.returncode}").strip()
-        except FileNotFoundError:
-            last_error = "AWS CLI is not installed or not on PATH."
-        except subprocess.TimeoutExpired:
-            last_error = "Login command timed out after 5 minutes."
-        except Exception as e:
-            last_error = str(e)
-
-    _update_login_job(
-        login_id,
-        status="failed",
-        message=f"Failed to login profile '{profile}'.",
-        error=last_error or "Unknown login error.",
-    )
+    cmd = ["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=cmd_env)
+        if proc.returncode != 0:
+            return None, (proc.stderr or proc.stdout or f"exit_code={proc.returncode}").strip()
+        payload = json.loads(proc.stdout or "{}")
+        return payload, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _maker_checker_should_gate(tool_name: str, mcp_server: Optional[str], active_profile: Optional[str] = None) -> bool:
@@ -1272,18 +1211,25 @@ async def get_aws_identity(request: Request):
     try:
         active_profile = _current_profile(request)
         _activate_profile(active_profile)
-        # Re-initialize to catch new credentials
         aws_mcp.rbac.initialize()
         info = aws_mcp.rbac.get_user_info()
-        
+
         if "error" in info:
              return JSONResponse({
                 "active": False,
                 "error": info["error"],
-                "profile": active_profile
+                "profile": active_profile,
+                "account": None,
+                "arn": None,
+                "user_name": None,
+                "regions": [],
             })
 
-        regions = aws_mcp.rbac.get_allowed_regions()
+        regions: List[str] = []
+        try:
+            regions = aws_mcp.rbac.get_allowed_regions()
+        except Exception as region_error:
+            logger.info(f"Unable to fetch allowed regions for profile '{active_profile}': {region_error}")
         arn = info.get("user_arn")
         return JSONResponse({
             "active": True,
@@ -1291,13 +1237,18 @@ async def get_aws_identity(request: Request):
             "arn": arn,
             "user_name": _extract_user_name_from_arn(arn),
             "regions": regions,
-            "profile": active_profile
+            "profile": active_profile,
         })
     except Exception as e:
         logger.warning(f"Failed to get AWS identity: {e}")
         return JSONResponse({
             "active": False,
-            "error": str(e)
+            "error": str(e),
+            "profile": _current_profile(request),
+            "account": None,
+            "arn": None,
+            "user_name": None,
+            "regions": [],
         })
 
 
@@ -1326,68 +1277,60 @@ async def list_aws_profiles(request: Request):
         "checker_profile": _primary_checker_profile(),
         "checker_profiles": _checker_profiles(),
         "maker_profiles": _maker_profiles(),
+        "login_profiles": {profile: _resolve_login_profile(profile) for profile in profiles},
+    })
+
+
+@app.get("/api/aws/diagnostics")
+async def aws_diagnostics(request: Request, profile: Optional[str] = Query(default=None)):
+    selected = profile or _current_profile(request)
+    login_profile = _resolve_login_profile(selected)
+    settings = _profile_settings(selected)
+    login_settings = _profile_settings(login_profile)
+    cli_identity, cli_identity_error = _cli_get_caller_identity(selected)
+    return JSONResponse({
+        "profile": selected,
+        "login_profile": login_profile,
+        "profile_settings": settings,
+        "login_profile_settings": login_settings,
+        "cli_identity": cli_identity,
+        "cli_identity_error": cli_identity_error,
     })
 
 
 @app.post("/api/aws/login")
 async def trigger_aws_login(request: Request, payload: Dict[str, str] = None):
-    """Start AWS login flow and track status for UI polling callback."""
-    global aws_login_latest_id
+    """Launch AWS CLI browser login for the selected profile."""
     profile = (payload or {}).get("profile") or _current_profile(request)
-    mode = (payload or {}).get("mode", "auto")
-    browser_hint = (payload or {}).get("browser") or _detect_browser_hint(request.headers.get("user-agent", ""))
     client_key = _client_key_from_request(request)
-    logger.info(f"API Request: POST /api/aws/login - Profile: {profile}, Mode: {mode}, Browser Hint: {browser_hint or 'default'}")
+    login_profile = _resolve_login_profile(profile)
+    logger.info(f"API Request: POST /api/aws/login - Profile: {profile}, Login Profile: {login_profile}")
 
     if not shutil.which("aws"):
         return JSONResponse({"success": False, "error": "AWS CLI not found. Install AWS CLI v2 and retry."})
+    cmd_env = os.environ.copy()
+    cmd_env["AWS_PROFILE"] = login_profile
+    cmd_env["AWS_DEFAULT_PROFILE"] = login_profile
+    cmd_env["AWS_SDK_LOAD_CONFIG"] = "1"
+    for env_key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        cmd_env.pop(env_key, None)
 
-    login_id = f"login-{uuid.uuid4().hex[:10]}"
-    job = {
-        "login_id": login_id,
-        "profile": profile,
-        "mode": mode,
-        "status": "queued",
-        "message": f"Starting login for profile '{profile}'...",
-        "command": "",
-        "error": "",
-        "stdout": "",
-        "stderr": "",
-        "created_at": _utc_iso_now(),
-        "updated_at": _utc_iso_now(),
-        "browser_hint": browser_hint or "",
-        "account": "",
-        "arn": "",
-        "client_key": client_key,
-    }
-    with aws_login_lock:
-        aws_login_jobs[login_id] = job
-        aws_login_latest_id = login_id
+    try:
+        subprocess.Popen(["aws", "login", "--profile", login_profile], env=cmd_env)
+    except Exception:
+        try:
+            subprocess.Popen(["aws", "sso", "login", "--profile", login_profile], env=cmd_env)
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
 
-    t = threading.Thread(
-        target=_run_aws_login_job_with_browser,
-        args=(login_id, profile, mode, browser_hint, client_key),
-        daemon=True,
-    )
-    t.start()
+    _set_client_profile(profile, client_key=client_key)
+    _activate_profile(profile)
     return JSONResponse({
         "success": True,
-        "login_id": login_id,
-        "status": "queued",
-        "message": "Login started. Browser should open for AWS authentication.",
+        "profile": profile,
+        "login_profile": login_profile,
+        "message": "AWS CLI login launched. Complete authentication in the browser.",
     })
-
-
-@app.get("/api/aws/login/status")
-async def aws_login_status(login_id: Optional[str] = Query(default=None)):
-    lookup_id = login_id
-    with aws_login_lock:
-        if not lookup_id:
-            lookup_id = aws_login_latest_id
-        job = aws_login_jobs.get(lookup_id) if lookup_id else None
-    if not job:
-        return JSONResponse({"success": False, "error": "No login job found."})
-    return JSONResponse({"success": True, "job": job})
 
 
 def get_llm(provider: str, model: Optional[str], credential_source: Optional[str], mcp_server_name: Optional[str] = "none"):

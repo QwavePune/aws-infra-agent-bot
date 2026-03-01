@@ -1,0 +1,114 @@
+@startuml
+title AWS Infra Agent Bot - Functional Architecture
+
+skinparam backgroundColor white
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment left
+
+actor User
+
+package "Browser UI\n(ui/index.html, ui/app.js, ui/app.css)" as UI {
+  [Console SPA] as SPA
+  [Audit Trail View] as AUDIT
+  [Maker-Checker Modals] as MCMODAL
+  [AWS Login Modal] as LOGINMODAL
+  [SSE Event Handler] as SSE
+}
+
+package "AGUI Backend\n(bin/agui_server.py)" as API {
+  [FastAPI Routes] as ROUTES
+  [Run Agent SSE Loop] as RUNNER
+  [Conversation Store] as CONV
+  [Client Profile Context] as PROFILE
+  [Maker-Checker Queue] as MCQ
+  [Audit Export / Query] as AUDAPI
+}
+
+package "Core Services\n(core/*)" as CORE {
+  [LLM Config] as LLMCFG
+  [Agent Protocol] as AGENTPROTO
+  [Intent Policy] as INTPOL
+  [Workflow Logger] as WFLOG
+  [Architecture Parser] as ARCHPARSER
+  [Capabilities / Audience Helpers] as CAPS
+}
+
+package "MCP Layer\n(mcp_servers/*)" as MCP {
+  [AWS Terraform MCP Server] as AWSMCP
+  [Azure Terraform MCP Server] as AZMCP
+}
+
+package "AWS Terraform Domain\n(mcp_servers/aws_terraform/*)" as AWSDOMAIN {
+  [RBAC Manager] as RBAC
+  [Terraform Manager] as TFM
+  [Template Library] as TPL
+}
+
+database "Local Files" as FILES {
+  [logs/] as LOGS
+  [terraform_workspace/] as TFWORK
+  [maker_checker_roles.json] as ROLEFILE
+}
+
+cloud "External Services" as EXT {
+  [OpenAI / Other LLM APIs] as LLMEXT
+  [AWS CLI] as AWSCLI
+  [Terraform CLI] as TFCLI
+  [AWS STS / IAM / Cost Explorer /\nEC2 / ECS / S3 / Lambda / RDS] as AWSSVC
+}
+
+User --> SPA : chat, approvals, login, audit review
+SPA --> ROUTES : REST calls
+SPA --> RUNNER : POST /api/run\ntext/event-stream
+SSE --> SPA : render text, tool events,\nworkflow state, audit updates
+AUDIT --> ROUTES : audit filters/export
+MCMODAL --> ROUTES : approve / reject /\ncomment / execute
+LOGINMODAL --> ROUTES : profile select,\nlogin, diagnostics
+
+ROUTES --> PROFILE : resolve active profile
+ROUTES --> CONV : thread history
+ROUTES --> MCQ : queued approvals
+ROUTES --> AUDAPI : audit data
+ROUTES --> CAPS : static guidance requests
+ROUTES --> ARCHPARSER : parse image / mermaid /\ngenerate terraform
+
+RUNNER --> LLMCFG : initialize LLM
+RUNNER --> AGENTPROTO : prompt + tool call extraction
+RUNNER --> INTPOL : read-only guardrails
+RUNNER --> WFLOG : workflow events
+RUNNER --> AWSMCP : execute tool
+RUNNER --> AZMCP : execute tool
+
+AWSMCP --> RBAC : initialize session,\nidentity, regions
+AWSMCP --> TFM : init / plan / apply / destroy
+AWSMCP --> TPL : generate Terraform code
+AWSMCP --> WFLOG : log execution milestones
+
+RBAC --> AWSCLI : profile-backed auth
+RBAC --> AWSSVC : boto3 API calls
+TFM --> TFCLI : terraform commands
+TFM --> TFWORK : read/write project files
+WFLOG --> LOGS : workflow logs
+AUDAPI --> LOGS : audit trail reads
+MCQ --> ROLEFILE : maker/checker role config
+ARCHPARSER --> LLMEXT : vision / text generation
+
+ROUTES --> AWSCLI : aws login,\naws profile diagnostics
+AWSCLI --> AWSSVC : browser-based auth + API identity
+
+note right of RUNNER
+Main chat flow:
+1. Receive user request
+2. Invoke LLM with MCP tools
+3. Execute read-only or gated mutating tools
+4. Stream SSE events to the SPA
+end note
+
+note right of MCQ
+Mutating AWS actions can be queued for
+maker-checker approval before execution.
+end note
+
+@enduml

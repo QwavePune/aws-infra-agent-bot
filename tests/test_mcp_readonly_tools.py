@@ -74,6 +74,8 @@ def test_list_account_inventory_summarizes_counts(server, monkeypatch):
     assert result["summary"]["rds"] == 0
     assert result["summary"]["lambda"] == 8
     assert result["summary"]["ecs"] == 4
+    assert result["total_resources"] == 20
+    assert result["regions_scanned_count"] == 2
     assert len(result["regional_breakdown"]) == 2
 
 

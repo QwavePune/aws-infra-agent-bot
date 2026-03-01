@@ -1,0 +1,77 @@
+@startuml
+title Maker-Checker Workflow for Terraform-Based AWS Changes
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+actor Maker
+actor Checker
+participant "Browser UI\n(ui/app.js)" as UI
+participant "AGUI Backend\n/api/run + maker-checker APIs" as API
+participant "Run Agent SSE Loop" as RUNNER
+participant "LLM" as LLM
+participant "Maker-Checker Queue" as MCQ
+participant "AWS Terraform MCP Server" as MCP
+participant "Terraform Manager" as TFM
+participant "Terraform CLI / AWS" as EXEC
+
+Maker -> UI : Request mutating AWS change
+UI -> API : POST /api/run
+API -> RUNNER : start run
+RUNNER -> LLM : invoke with tools
+LLM --> RUNNER : mutating tool call\n(terraform_apply / create_* / destroy flow)
+
+RUNNER -> API : _maker_checker_should_gate(...)
+alt maker profile requires approval
+  RUNNER -> MCQ : create queued request\nwith tool, args, requester, plan preview
+  MCQ --> RUNNER : request_id + checker profile
+  RUNNER --> UI : MAKER_CHECKER_REQUEST
+  RUNNER --> UI : MAKER_CHECKER_STATUS\nRequest Captured -> Awaiting Approval
+  RUNNER -> LLM : follow-up text\n"queued for checker approval"
+  LLM --> RUNNER : confirmation text
+  RUNNER --> UI : assistant message
+else checker profile can execute directly
+  RUNNER -> MCP : execute mutating tool immediately
+end
+
+Checker -> UI : Open pending request
+UI -> API : GET /api/maker-checker/request/{id}
+API -> MCQ : fetch request + comments + plan preview
+API --> UI : request detail
+
+opt discussion before decision
+  Maker -> UI : add comment
+  UI -> API : POST /api/maker-checker/comment
+  API -> MCQ : append comment
+  API --> UI : updated thread
+
+  Checker -> UI : add comment
+  UI -> API : POST /api/maker-checker/comment
+  API -> MCQ : append comment
+  API --> UI : updated thread
+end
+
+Checker -> UI : Approve with optional notes
+UI -> API : POST /api/maker-checker/approve
+API -> MCQ : set status=approved
+API --> UI : updated request
+UI -> UI : enable Execute Plan action
+
+Maker -> UI : Click Execute Plan
+UI -> API : POST /api/maker-checker/execute
+API -> MCQ : mark status=executing
+API -> MCP : execute_tool(tool_name, tool_args)\nas checker profile
+MCP -> TFM : plan/apply/destroy as needed
+TFM -> EXEC : terraform command + AWS calls
+EXEC --> TFM : execution output
+TFM --> MCP : result
+MCP --> API : success/failure
+API -> MCQ : store execution_result,\nstatus=executed|failed
+API --> UI : updated request
+
+UI -> UI : Show execution output in workflow panel\nand audit trail
+UI -> API : GET /api/audit
+API --> UI : approval + execution timeline
+
+@enduml

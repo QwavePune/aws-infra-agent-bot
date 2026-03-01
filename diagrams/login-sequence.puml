@@ -1,0 +1,56 @@
+@startuml
+title AWS CLI Login and Identity Refresh
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+actor User
+participant "Browser UI\n(ui/app.js)" as UI
+participant "AGUI Backend\n(bin/agui_server.py)" as API
+participant "Client Profile Context" as PROFILE
+participant "AWS CLI" as CLI
+participant "Browser-based AWS Login" as BLOGIN
+participant "AWS STS / IAM" as AWS
+participant "AWS MCP RBAC" as RBAC
+
+User -> UI : Open CLI Login modal
+UI -> API : GET /api/aws/profiles
+API -> PROFILE : resolve current profile
+API --> UI : profiles + current profile
+
+User -> UI : Select profile + Start Login
+UI -> API : POST /api/aws/profile
+API -> PROFILE : store selected profile
+API --> UI : success
+
+UI -> API : POST /api/aws/login
+API -> PROFILE : resolve active profile
+API -> CLI : aws login --profile <profile>\n(or aws sso login fallback)
+CLI -> BLOGIN : open local browser flow
+API --> UI : login launched
+
+User -> BLOGIN : authenticate with AWS
+BLOGIN -> CLI : localhost OAuth callback
+CLI -> AWS : exchange auth for session
+
+loop until active or timeout
+  UI -> API : GET /api/aws/identity
+  API -> PROFILE : resolve profile
+  API -> RBAC : initialize()
+  RBAC -> AWS : get caller identity + regions
+  alt session active
+    AWS --> RBAC : account, arn, regions
+    RBAC --> API : user info
+    API --> UI : active=true, profile, account,\nuser_name, arn, regions
+    UI -> UI : update AWS Identity card
+  else session inactive / expired
+    AWS --> RBAC : auth error
+    RBAC --> API : error
+    API --> UI : active=false, error, profile
+  end
+end
+
+UI -> User : Show profile/account on left panel
+
+@enduml

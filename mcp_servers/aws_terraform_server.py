@@ -1672,11 +1672,17 @@ class MCPAWSManagerServer:
                     region_counts[rtype] = count
             regional_breakdown.append(region_counts)
 
+        total_resources = sum(summary.values())
+
         return {
             "success": True,
             "summary": summary,
             "regions_scanned": regions,
-            "regional_breakdown": regional_breakdown
+            "regions_scanned_count": len(regions),
+            "total_resources": total_resources,
+            "regional_breakdown": regional_breakdown,
+            "inventory_scope": ["ec2", "vpc", "rds", "lambda", "ecs", "s3"],
+            "note": "Inventory summary currently counts EC2, VPC, RDS, Lambda, ECS, and S3 resources.",
         }
 
     def _get_cost_explorer_summary(self, params: Dict[str, Any]) -> Dict[str, Any]:

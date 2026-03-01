@@ -7,6 +7,7 @@ const statusMeta = document.getElementById("statusMeta");
 const runProgress = document.getElementById("runProgress");
 const runProgressText = document.getElementById("runProgressText");
 const runProgressTimer = document.getElementById("runProgressTimer");
+const toolOutputSelect = document.getElementById("toolOutputSelect");
 const modelSelect = document.getElementById("modelSelect");
 const mcpSelect = document.getElementById("mcpSelect");
 const providerLabel = document.getElementById("providerLabel");
@@ -38,6 +39,9 @@ const awsLoginModalClose = document.getElementById("awsLoginModalClose");
 const awsProfileSelect = document.getElementById("awsProfileSelect");
 const awsStartLoginBtn = document.getElementById("awsStartLoginBtn");
 const awsLoginStatusText = document.getElementById("awsLoginStatusText");
+const awsRunDiagnosticsBtn = document.getElementById("awsRunDiagnosticsBtn");
+const awsDiagnosticsMeta = document.getElementById("awsDiagnosticsMeta");
+const awsDiagnosticsPanel = document.getElementById("awsDiagnosticsPanel");
 const mcRolesModal = document.getElementById("mcRolesModal");
 const mcRolesModalClose = document.getElementById("mcRolesModalClose");
 const mcRolesStatusText = document.getElementById("mcRolesStatusText");
@@ -63,8 +67,6 @@ const brandMark = document.getElementById("brandMark");
 const brandSub = document.getElementById("brandSub");
 const identityTitle = document.getElementById("identityTitle");
 const identityHelp = document.getElementById("identityHelp");
-const workflowTitle = document.getElementById("workflowTitle");
-const workflowList = document.getElementById("workflowList");
 const quickActions = document.getElementById("quickActions");
 const welcomeMessage = document.getElementById("welcomeMessage");
 
@@ -79,6 +81,8 @@ let awsLoginPollTimer = null;
 let runTimerInterval = null;
 let runStartedAt = null;
 let makerCheckerRolesCache = null;
+let awsIdentityPollAttempts = 0;
+const TOOL_OUTPUT_MODE_KEY = "aguiToolOutputMode";
 
 const MODEL_SEPARATOR = "::";
 const CLOUD_AWS = "aws";
@@ -97,20 +101,11 @@ const CLOUD_CONTEXT = {
     identityPrefix: "AWS",
     welcome:
       "Welcome back. I can guide AWS infrastructure workflows, validate prerequisites, and execute MCP tools in real time.",
-    placeholder: "Ask for inventory, deployment, or guided ECS flow...",
-    workflowTitle: "Guided Workflow",
-    workflowSteps: [
-      "Start workflow and collect requirements",
-      "Validate IDs, roles, and region prerequisites",
-      "Create Terraform project",
-      "Run plan then apply",
-    ],
+    placeholder: "Ask for AWS inventory, billing, identity, or infrastructure changes...",
     quickActions: [
       { label: "Capabilities", prompt: "What can you do for me?" },
       { label: "Inventory", prompt: "List all AWS resources in my account" },
-      { label: "Start ECS Flow", prompt: "Start ECS deployment workflow in ap-south-1" },
-      { label: "Review ECS", prompt: "Review my current ECS deployment workflow" },
-      { label: "Terraform Plan", prompt: "Run terraform_plan for my last project" },
+      { label: "Cost", prompt: "What is my total billed cost of AWS resources?" },
       { label: "Who Am I", prompt: "Show my current AWS identity and permissions" },
     ],
   },
@@ -125,19 +120,10 @@ const CLOUD_CONTEXT = {
     identityPrefix: "Azure",
     welcome:
       "Welcome back. I can show Azure infrastructure capabilities and provide a dummy Terraform plan preview while full Azure execution is under construction.",
-    placeholder: "Ask for Azure resource options, capabilities, or Terraform plan preview...",
-    workflowTitle: "Azure Workflow",
-    workflowSteps: [
-      "Capture Azure infrastructure requirements",
-      "Generate Terraform skeleton for Azure resources",
-      "Preview terraform_plan output",
-      "Use under-construction response for apply/build",
-    ],
+    placeholder: "Ask for Azure resource options, capabilities, or identity context...",
     quickActions: [
       { label: "Capabilities", prompt: "What can you do for me?" },
       { label: "Azure Resources", prompt: "List all Azure resources available for build" },
-      { label: "Terraform Plan", prompt: "Run terraform_plan for azure-demo" },
-      { label: "Terraform Apply", prompt: "Run terraform_apply for azure-demo" },
       { label: "Build VM", prompt: "Create an Azure VM with Terraform" },
       { label: "Status", prompt: "Are you ready to build real Azure infrastructure?" },
     ],
@@ -153,14 +139,7 @@ const CLOUD_CONTEXT = {
     identityPrefix: "Cloud",
     welcome:
       "Welcome back. Select an MCP server to enable cloud-specific infrastructure tooling.",
-    placeholder: "Select an MCP server, then ask for capabilities or workflows...",
-    workflowTitle: "Guided Workflow",
-    workflowSteps: [
-      "Select MCP server",
-      "Capture requirements",
-      "Generate Terraform",
-      "Plan and apply",
-    ],
+    placeholder: "Select an MCP server, then ask for capabilities or infrastructure actions...",
     quickActions: [
       { label: "Capabilities", prompt: "What can you do for me?" },
       { label: "Enable MCP", prompt: "Enable MCP and show capabilities" },
@@ -172,6 +151,8 @@ const CLOUD_CONTEXT = {
 const setStatus = (value) => {
   statusMeta.textContent = value;
 };
+
+const currentToolOutputMode = () => toolOutputSelect?.value || "text-only";
 
 const formatElapsed = (ms) => {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -675,18 +656,8 @@ const applyCloudContext = () => {
   if (brandSub) brandSub.textContent = context.brandSub;
   if (identityTitle) identityTitle.textContent = context.identityTitle;
   if (identityHelp) identityHelp.textContent = context.identityHelp;
-  if (workflowTitle) workflowTitle.textContent = context.workflowTitle;
   if (welcomeMessage) welcomeMessage.textContent = context.welcome;
   if (promptInput) promptInput.placeholder = context.placeholder;
-
-  if (workflowList) {
-    workflowList.innerHTML = "";
-    context.workflowSteps.forEach((step) => {
-      const li = document.createElement("li");
-      li.textContent = step;
-      workflowList.appendChild(li);
-    });
-  }
 
   renderQuickActions(context.quickActions);
   syncCloudButtons(cloud);
@@ -733,6 +704,16 @@ const loadModels = async () => {
 };
 
 modelSelect.addEventListener("change", updateProviderLabel);
+
+if (toolOutputSelect) {
+  const savedToolMode = localStorage.getItem(TOOL_OUTPUT_MODE_KEY);
+  if (savedToolMode === "full-tool-output" || savedToolMode === "text-only") {
+    toolOutputSelect.value = savedToolMode;
+  }
+  toolOutputSelect.addEventListener("change", () => {
+    localStorage.setItem(TOOL_OUTPUT_MODE_KEY, toolOutputSelect.value);
+  });
+}
 
 const categorizeTools = (tools, cloud) => {
   const dedupedMap = new Map();
@@ -998,15 +979,17 @@ const sendMessage = async (message) => {
         currentAssistantBubble = null;
       }
       if (event.type === "TOOL_RESULT") {
-        const toolBubble = addMessage("assistant", "");
-        const toolName = escapeHtml(String(event.toolName || "unknown_tool"));
-        const rendered = formatToolResult(event.result);
-        toolBubble.innerHTML = `<strong>Tool: ${toolName}</strong>`;
-        const pre = document.createElement("pre");
-        pre.className = "tool-result";
-        pre.textContent = rendered;
-        toolBubble.appendChild(pre);
-        chatStream.scrollTop = chatStream.scrollHeight;
+        if (currentToolOutputMode() === "full-tool-output") {
+          const toolBubble = addMessage("assistant", "");
+          const toolName = escapeHtml(String(event.toolName || "unknown_tool"));
+          const rendered = formatToolResult(event.result);
+          toolBubble.innerHTML = `<strong>Tool: ${toolName}</strong>`;
+          const pre = document.createElement("pre");
+          pre.className = "tool-result";
+          pre.textContent = rendered;
+          toolBubble.appendChild(pre);
+          chatStream.scrollTop = chatStream.scrollHeight;
+        }
         if (event.result?.queued_for_approval) {
           setMakerCheckerFlow({
             total: 4,
@@ -1075,6 +1058,7 @@ const awsLoginBtn = document.getElementById("awsLoginBtn");
 const awsConsoleBtn = document.getElementById("awsConsoleBtn");
 const awsIdentity = document.getElementById("awsIdentity");
 const awsAccountLabel = document.getElementById("awsAccount");
+const identityHelpText = document.getElementById("identityHelp");
 
 const syncCloudButtons = (cloud) => {
   const context = CLOUD_CONTEXT[cloud] || CLOUD_CONTEXT[CLOUD_GENERIC];
@@ -1110,20 +1094,34 @@ const refreshAwsIdentity = async () => {
   try {
     const response = await fetch("/api/aws/identity");
     const data = await response.json();
+    const profileLabel = data.profile || "no profile selected";
+    awsIdentity.style.display = "flex";
     if (data.active) {
-      awsIdentity.style.display = "flex";
       awsAccountLabel.innerHTML = `AWS: ${data.account} · ${data.user_name || "unknown"} <small style="opacity: 0.7; margin-left: 5px;">(${data.profile})</small>`;
+      if (identityHelpText) {
+        identityHelpText.textContent = "Authenticated via AWS CLI. Identity is ready for MCP operations.";
+      }
       awsLoginBtn.textContent = "Refresh CLI";
       awsLoginBtn.classList.remove("btn-primary");
       awsLoginBtn.classList.add("btn-secondary");
     } else {
-      awsIdentity.style.display = "none";
+      awsAccountLabel.innerHTML = `AWS Profile: <strong>${escapeHtml(profileLabel)}</strong> <small style="opacity: 0.75; margin-left: 5px;">session not verified</small>`;
+      if (identityHelpText) {
+        identityHelpText.textContent = data.error
+          ? `Selected profile could not be verified yet: ${data.error}`
+          : "Use CLI Login to authenticate the selected AWS profile.";
+      }
       awsLoginBtn.textContent = "CLI Login";
       awsLoginBtn.classList.remove("btn-secondary");
       awsLoginBtn.classList.add("btn-primary");
     }
   } catch (error) {
     console.error("Failed to fetch AWS identity", error);
+    awsIdentity.style.display = "flex";
+    awsAccountLabel.textContent = "AWS Profile: unavailable";
+    if (identityHelpText) {
+      identityHelpText.textContent = "Failed to load AWS identity state from the backend.";
+    }
   }
 };
 
@@ -1132,11 +1130,33 @@ const stopAwsLoginPolling = () => {
     clearInterval(awsLoginPollTimer);
     awsLoginPollTimer = null;
   }
+  awsIdentityPollAttempts = 0;
 };
 
 const closeAwsLoginModal = () => {
   stopAwsLoginPolling();
   if (awsLoginModal) awsLoginModal.classList.add("hidden-view");
+};
+
+const runAwsDiagnostics = async (profile) => {
+  const selected = (profile || awsProfileSelect?.value || "").trim() || "default";
+  if (awsDiagnosticsMeta) awsDiagnosticsMeta.textContent = `Running diagnostics for '${selected}'...`;
+  if (awsDiagnosticsPanel) awsDiagnosticsPanel.textContent = "Loading diagnostics...";
+  try {
+    const response = await fetch(`/api/aws/diagnostics?profile=${encodeURIComponent(selected)}`);
+    const data = await response.json();
+    const runtimeProfile = data.profile || selected;
+    const loginProfile = data.login_profile || runtimeProfile;
+    if (awsDiagnosticsMeta) {
+      awsDiagnosticsMeta.textContent = `Runtime profile: ${runtimeProfile} • Login profile: ${loginProfile}`;
+    }
+    if (awsDiagnosticsPanel) {
+      awsDiagnosticsPanel.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (error) {
+    if (awsDiagnosticsMeta) awsDiagnosticsMeta.textContent = `Diagnostics failed for '${selected}'.`;
+    if (awsDiagnosticsPanel) awsDiagnosticsPanel.textContent = String(error);
+  }
 };
 
 const openAwsLoginModal = async () => {
@@ -1162,39 +1182,36 @@ const openAwsLoginModal = async () => {
     }
     const checkers = (data.checker_profiles || []).join(", ");
     awsLoginStatusText.textContent = `Checker profiles: ${checkers || "not configured"}`;
+    await runAwsDiagnostics(data.current_profile || profiles[0] || "default");
   } catch (error) {
     awsLoginStatusText.textContent = "Failed to load AWS profiles.";
+    if (awsDiagnosticsMeta) awsDiagnosticsMeta.textContent = "Diagnostics unavailable.";
+    if (awsDiagnosticsPanel) awsDiagnosticsPanel.textContent = "Unable to load diagnostics.";
   }
   awsLoginModal.classList.remove("hidden-view");
 };
 
-const pollAwsLoginStatus = (loginId) => {
+const pollAwsIdentity = (profile) => {
   stopAwsLoginPolling();
   awsLoginPollTimer = setInterval(async () => {
     try {
-      const response = await fetch(`/api/aws/login/status?login_id=${encodeURIComponent(loginId)}`);
+      awsIdentityPollAttempts += 1;
+      const response = await fetch("/api/aws/identity");
       const data = await response.json();
-      if (!data.success) {
-        awsLoginStatusText.textContent = data.error || "Login status unavailable.";
-        return;
-      }
-      const job = data.job || {};
-      awsLoginStatusText.textContent = job.message || `Status: ${job.status || "unknown"}`;
-      if (job.status === "success") {
+      if (data.active) {
         stopAwsLoginPolling();
-        await fetch("/api/aws/profile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profile: job.profile }),
-        });
         await refreshAwsIdentity();
         await refreshMakerCheckerQueue();
-        const idSuffix = job.arn ? ` (${job.arn})` : "";
-        addMessage("assistant", `AWS login successful for profile '${job.profile}'${idSuffix}.`);
+        await runAwsDiagnostics(profile || data.profile);
+        addMessage("assistant", `AWS login successful for profile '${data.profile}'.`);
         closeAwsLoginModal();
-      } else if (job.status === "failed") {
+        return;
+      }
+      awsLoginStatusText.textContent = `Waiting for AWS session on profile '${profile}'...`;
+      if (awsIdentityPollAttempts >= 60) {
         stopAwsLoginPolling();
-        addMessage("assistant", `AWS login failed for profile '${job.profile}': ${job.error || "unknown error"}`);
+        addMessage("assistant", `AWS login did not complete for profile '${profile}'. Check the browser login tab and try again.`);
+        await runAwsDiagnostics(profile);
       }
     } catch (error) {
       awsLoginStatusText.textContent = "Polling failed. Check backend logs.";
@@ -1228,6 +1245,12 @@ if (awsLoginModal) {
 
 if (awsLoginModalClose) {
   awsLoginModalClose.addEventListener("click", () => closeAwsLoginModal());
+}
+
+if (awsProfileSelect) {
+  awsProfileSelect.addEventListener("change", async () => {
+    await runAwsDiagnostics((awsProfileSelect.value || "").trim() || "default");
+  });
 }
 
 if (mcManageRolesBtn) {
@@ -1289,33 +1312,38 @@ if (mcSaveRolesBtn) {
 if (awsStartLoginBtn) {
   awsStartLoginBtn.addEventListener("click", async () => {
     const profile = (awsProfileSelect?.value || "").trim() || "default";
-    const ua = (navigator.userAgent || "").toLowerCase();
-    let browserHint = "default";
-    if (ua.includes("safari") && !ua.includes("chrome") && !ua.includes("chromium")) {
-      browserHint = "safari";
-    } else if (ua.includes("chrome") || ua.includes("chromium")) {
-      browserHint = "chrome";
-    }
     awsLoginStatusText.textContent = `Starting login for profile '${profile}'...`;
     awsStartLoginBtn.disabled = true;
     try {
+      await fetch("/api/aws/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile }),
+      });
       const response = await fetch("/api/aws/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, mode: "auto", browser: browserHint }),
+        body: JSON.stringify({ profile }),
       });
       const data = await response.json();
       if (!data.success) {
         awsLoginStatusText.textContent = data.error || "Failed to start login.";
         return;
       }
-      awsLoginStatusText.textContent = "Browser login started. Complete login and wait for callback...";
-      pollAwsLoginStatus(data.login_id);
+      awsLoginStatusText.textContent = "Browser login started. Complete AWS authentication in the browser; AGUI is polling for an active session.";
+      await runAwsDiagnostics(profile);
+      pollAwsIdentity(profile);
     } catch (error) {
       awsLoginStatusText.textContent = "Login start failed.";
     } finally {
       awsStartLoginBtn.disabled = false;
     }
+  });
+}
+
+if (awsRunDiagnosticsBtn) {
+  awsRunDiagnosticsBtn.addEventListener("click", async () => {
+    await runAwsDiagnostics((awsProfileSelect?.value || "").trim() || "default");
   });
 }
 

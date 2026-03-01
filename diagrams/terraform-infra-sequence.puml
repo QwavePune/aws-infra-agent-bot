@@ -1,0 +1,70 @@
+@startuml
+title Terraform-Based Infrastructure Setup from Chat
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+actor User
+participant "Browser UI\n(ui/app.js)" as UI
+participant "AGUI Backend\n/api/run" as API
+participant "Run Agent SSE Loop" as RUNNER
+participant "LLM" as LLM
+participant "Agent Protocol /\nIntent Policy" as POLICY
+participant "AWS Terraform MCP Server" as MCP
+participant "Template Library" as TPL
+participant "Terraform Manager" as TFM
+participant "Terraform CLI" as TFCLI
+participant "AWS APIs" as AWS
+
+User -> UI : Ask to create AWS infrastructure
+UI -> API : POST /api/run
+API -> RUNNER : start streaming run
+RUNNER --> UI : RUN_STARTED + TEXT_MESSAGE_START
+
+RUNNER -> LLM : invoke(history + tools)
+LLM --> RUNNER : tool call(s)\ncreate_* / terraform_plan / terraform_apply
+RUNNER -> POLICY : validate intent and tool safety
+
+alt create project tool
+  RUNNER -> MCP : execute_tool(create_vpc / create_ec2_instance /\ncreate_s3_bucket / create_lambda_function / ...)
+  MCP -> TPL : render Terraform code template
+  MCP -> TFM : write project into terraform_workspace/
+  TFM --> MCP : project files created
+  MCP --> RUNNER : success + project_name
+  RUNNER --> UI : TOOL_RESULT
+  RUNNER -> LLM : follow-up with tool result
+end
+
+alt terraform plan
+  RUNNER -> MCP : execute_tool(terraform_plan, project_name)
+  MCP -> TFM : init(project)
+  TFM -> TFCLI : terraform init
+  TFCLI --> TFM : init output
+  MCP -> TFM : plan(project)
+  TFM -> TFCLI : terraform plan -out=tfplan
+  TFCLI --> TFM : plan output
+  TFM --> MCP : stdout/stderr/success
+  MCP --> RUNNER : plan result
+  RUNNER --> UI : TOOL_RESULT + status update
+end
+
+alt terraform apply
+  RUNNER -> MCP : execute_tool(terraform_apply, project_name)
+  MCP -> TFM : apply(project)
+  TFM -> AWS : obtain active credentials via RBAC env
+  TFM -> TFCLI : terraform apply tfplan
+  TFCLI -> AWS : provision resources
+  AWS --> TFCLI : provider responses
+  TFCLI --> TFM : apply output
+  TFM --> MCP : success/failure
+  MCP --> RUNNER : execution result
+  RUNNER --> UI : TOOL_RESULT
+end
+
+RUNNER -> LLM : summarize results
+LLM --> RUNNER : final answer
+RUNNER --> UI : TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END
+RUNNER --> UI : RUN_FINISHED
+
+@enduml

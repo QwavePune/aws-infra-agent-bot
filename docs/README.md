@@ -7,11 +7,17 @@ The primary goal of this project is to empower users to build and manage complex
 
 ## List of typical actions this agent can perform
 [x] Who are you?
+
 [x] What can you do for me?
+
 [x] Create an EC2 instance [follow up questions to be answered]
+
 [x] Use this mermaid code and build the infrastructure [provide a valid mermaid diagram for AWS]
+
 [x] List all AWS resources in my account
+
 [x] Who is the audience for this agent?
+
 ---
 
 ## ✨ Key Features

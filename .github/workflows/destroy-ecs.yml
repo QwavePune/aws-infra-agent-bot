@@ -1,0 +1,141 @@
+name: Destroy ECS Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "ap-south-1"
+      cluster_name:
+        description: "ECS cluster name"
+        required: true
+        default: "langchain-agent-cluster"
+      service_name:
+        description: "ECS service name"
+        required: true
+        default: "langchain-agent-service"
+      task_family:
+        description: "Task definition family to deregister"
+        required: true
+        default: "langchain-agent"
+      delete_log_group:
+        description: "Delete /ecs/langchain-agent log group too"
+        required: true
+        default: "false"
+      delete_ecr_repository:
+        description: "Delete ECR repository too"
+        required: true
+        default: "false"
+
+env:
+  ECR_REPOSITORY: langchain-agent
+  LOG_GROUP_NAME: /ecs/langchain-agent
+
+jobs:
+  destroy:
+    name: Delete ECS Cluster and Service
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Delete ECS service if it exists
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          ECS_CLUSTER: ${{ inputs.cluster_name }}
+          ECS_SERVICE: ${{ inputs.service_name }}
+        run: |
+          SERVICE_STATUS="$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].status' \
+            --output text 2>/dev/null || true)"
+
+          if [ -n "$SERVICE_STATUS" ] && [ "$SERVICE_STATUS" != "None" ] && [ "$SERVICE_STATUS" != "INACTIVE" ]; then
+            aws ecs update-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "$ECS_SERVICE" \
+              --desired-count 0 \
+              --region "$AWS_REGION"
+
+            aws ecs delete-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "$ECS_SERVICE" \
+              --force \
+              --region "$AWS_REGION"
+
+            aws ecs wait services-inactive \
+              --cluster "$ECS_CLUSTER" \
+              --services "$ECS_SERVICE" \
+              --region "$AWS_REGION"
+          else
+            echo "Service '$ECS_SERVICE' does not exist or is already inactive."
+          fi
+
+      - name: Delete ECS cluster if it exists
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          ECS_CLUSTER: ${{ inputs.cluster_name }}
+        run: |
+          CLUSTER_STATUS="$(aws ecs describe-clusters \
+            --clusters "$ECS_CLUSTER" \
+            --region "$AWS_REGION" \
+            --query 'clusters[0].status' \
+            --output text 2>/dev/null || true)"
+
+          if [ -n "$CLUSTER_STATUS" ] && [ "$CLUSTER_STATUS" != "None" ] && [ "$CLUSTER_STATUS" != "INACTIVE" ]; then
+            aws ecs delete-cluster --cluster "$ECS_CLUSTER" --region "$AWS_REGION"
+          else
+            echo "Cluster '$ECS_CLUSTER' does not exist or is already inactive."
+          fi
+
+      - name: Deregister active task definitions for family
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TASK_FAMILY: ${{ inputs.task_family }}
+        run: |
+          TASK_DEFS="$(aws ecs list-task-definitions \
+            --family-prefix "$TASK_FAMILY" \
+            --status ACTIVE \
+            --region "$AWS_REGION" \
+            --query 'taskDefinitionArns' \
+            --output text 2>/dev/null || true)"
+
+          if [ -n "$TASK_DEFS" ]; then
+            for arn in $TASK_DEFS; do
+              aws ecs deregister-task-definition \
+                --task-definition "$arn" \
+                --region "$AWS_REGION" >/dev/null
+            done
+          else
+            echo "No active task definitions found for family '$TASK_FAMILY'."
+          fi
+
+      - name: Optionally delete CloudWatch log group
+        if: ${{ inputs.delete_log_group == 'true' }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+        run: |
+          aws logs delete-log-group \
+            --log-group-name "$LOG_GROUP_NAME" \
+            --region "$AWS_REGION" || true
+
+      - name: Optionally delete ECR repository
+        if: ${{ inputs.delete_ecr_repository == 'true' }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+        run: |
+          aws ecr delete-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --force \
+            --region "$AWS_REGION" || true

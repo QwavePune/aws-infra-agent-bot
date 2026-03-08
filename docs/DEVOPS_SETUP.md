@@ -103,11 +103,17 @@ cat > deployment-policy.json <<EOF
     {
       "Effect": "Allow",
       "Action": [
+        "ecs:CreateCluster",
+        "ecs:DeleteCluster",
+        "ecs:CreateService",
+        "ecs:DeleteService",
         "ecs:UpdateService",
         "ecs:DescribeServices",
         "ecs:DescribeTaskDefinition",
         "ecs:DescribeClusters",
-        "ecs:RegisterTaskDefinition"
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:ListTaskDefinitions"
       ],
       "Resource": "*"
     },
@@ -115,15 +121,31 @@ cat > deployment-policy.json <<EOF
       "Effect": "Allow",
       "Action": [
         "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
         "logs:CreateLogStream",
-        "logs:PutLogEvents"
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups"
       ],
-      "Resource": "arn:aws:logs:us-east-1:724255305552:log-group:/aws/lambda/langchain-agent*"
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcs",
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": "*"
     },
     {
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::724255305552:role/lambda-execution-role"
+      "Resource": [
+        "arn:aws:iam::724255305552:role/ecsTaskExecutionRole",
+        "arn:aws:iam::724255305552:role/ecsTaskRole",
+        "arn:aws:iam::724255305552:role/lambda-execution-role"
+      ]
     }
   ]
 }

@@ -150,13 +150,23 @@ AWS_PROFILE=default aws iam put-role-policy \
 ### 5.2 ECS deployment permissions
 
 Role also needs:
+- `ecs:CreateCluster`
+- `ecs:DeleteCluster`
+- `ecs:CreateService`
+- `ecs:DeleteService`
 - `ecs:RegisterTaskDefinition`
+- `ecs:DeregisterTaskDefinition`
 - `ecs:DescribeTaskDefinition`
 - `ecs:DescribeServices`
 - `ecs:UpdateService`
+- `ecs:ListTaskDefinitions`
 - `logs:CreateLogGroup` / `logs:DescribeLogGroups`
+- `logs:DeleteLogGroup` if you use the destroy workflow cleanup option
+- `ec2:DescribeSubnets` / `ec2:DescribeSecurityGroups` for validation and environment checks
 - `iam:PassRole` for task execution role and task role
 - `secretsmanager:GetSecretValue` for secret ARN
+
+If bootstrap fails with `AccessDeniedException` for `ecs:CreateCluster`, your GitHub Actions role policy is still deploy-only and has not been expanded for bootstrap/teardown.
 
 ---
 

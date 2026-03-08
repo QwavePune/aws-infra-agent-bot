@@ -1672,7 +1672,9 @@ class MCPAWSManagerServer:
                     region_counts[rtype] = count
             regional_breakdown.append(region_counts)
 
-        total_resources = sum(summary.values())
+        # Keep total_resources scoped to region-bound inventory so global S3
+        # count is reported in summary without inflating the cross-region total.
+        total_resources = sum(summary[rtype] for rtype in ("ec2", "vpc", "rds", "lambda", "ecs"))
 
         return {
             "success": True,

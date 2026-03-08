@@ -19,10 +19,14 @@ The workflow expects:
 - OIDC trust between GitHub and IAM role.
 - IAM role permissions for ECR/ECS/Logs/Secrets.
 - Required GitHub Actions secrets.
-- ECS cluster/service already created.
+- ECS cluster/service already created, or bootstrapped through the manual workflow added for this repo.
 
 Main workflow file:
 - `.github/workflows/ci-cd.yml`
+
+Manual environment workflows:
+- `.github/workflows/bootstrap-ecs.yml`
+- `.github/workflows/destroy-ecs.yml`
 
 ---
 
@@ -177,7 +181,171 @@ Note:
 
 ---
 
-## 7. Dockerfile Build Fix Applied
+## 7. One-Time ECS Bootstrap Prerequisites
+
+Before the ECS bootstrap workflow can succeed, you still need:
+- an ECS task execution role
+- an ECS task role
+- at least one subnet, usually two, for Fargate networking
+- a security group that allows outbound HTTPS
+- Secrets Manager secrets for OpenAI and/or Perplexity
+
+### 7.1 Create ECS task execution role
+
+This role is assumed by the ECS agent to pull images from ECR, write logs, and read Secrets Manager values referenced by the task definition.
+
+```bash
+AWS_PROFILE=default aws iam create-role \
+  --role-name ecsTaskExecutionRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[
+      {
+        "Effect":"Allow",
+        "Principal":{"Service":"ecs-tasks.amazonaws.com"},
+        "Action":"sts:AssumeRole"
+      }
+    ]
+  }'
+
+AWS_PROFILE=default aws iam attach-role-policy \
+  --role-name ecsTaskExecutionRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+AWS_PROFILE=default aws iam put-role-policy \
+  --role-name ecsTaskExecutionRole \
+  --policy-name ecs-task-secrets-access \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[
+      {
+        "Effect":"Allow",
+        "Action":["secretsmanager:GetSecretValue"],
+        "Resource":"*"
+      }
+    ]
+  }'
+```
+
+### 7.2 Create ECS task role
+
+This is the role available to your application container at runtime. Start simple for testing, then tighten later.
+
+```bash
+AWS_PROFILE=default aws iam create-role \
+  --role-name ecsTaskRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[
+      {
+        "Effect":"Allow",
+        "Principal":{"Service":"ecs-tasks.amazonaws.com"},
+        "Action":"sts:AssumeRole"
+      }
+    ]
+  }'
+```
+
+If the app needs to read Secrets Manager directly at runtime, add:
+
+```bash
+AWS_PROFILE=default aws iam put-role-policy \
+  --role-name ecsTaskRole \
+  --policy-name app-secrets-access \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[
+      {
+        "Effect":"Allow",
+        "Action":["secretsmanager:GetSecretValue"],
+        "Resource":"*"
+      }
+    ]
+  }'
+```
+
+### 7.3 Create or locate subnets
+
+For a temporary environment, the easiest path is to reuse default-VPC subnets if your account has them:
+
+```bash
+AWS_PROFILE=default aws ec2 describe-subnets \
+  --region ap-south-1 \
+  --query 'Subnets[].{SubnetId:SubnetId,VpcId:VpcId,Az:AvailabilityZone,MapPublicIp:MapPublicIpOnLaunch}' \
+  --output table
+```
+
+Choose one or two subnets in the same VPC. For Fargate, two subnets across AZs is preferred.
+
+If you specifically want default-VPC subnets:
+
+```bash
+AWS_PROFILE=default aws ec2 describe-route-tables \
+  --region ap-south-1 \
+  --query 'RouteTables[].{RouteTableId:RouteTableId,VpcId:VpcId}'
+```
+
+### 7.4 Create or locate a security group
+
+For a simple temporary environment, a security group with outbound internet access is enough if the container does not expose inbound traffic.
+
+List existing groups:
+
+```bash
+AWS_PROFILE=default aws ec2 describe-security-groups \
+  --region ap-south-1 \
+  --query 'SecurityGroups[].{GroupId:GroupId,VpcId:VpcId,Name:GroupName}' \
+  --output table
+```
+
+Create a new one if needed:
+
+```bash
+AWS_PROFILE=default aws ec2 create-security-group \
+  --group-name langchain-agent-ecs-sg \
+  --description "Temporary ECS security group for langchain-agent" \
+  --vpc-id <your-vpc-id> \
+  --region ap-south-1
+```
+
+Allow all outbound traffic:
+
+```bash
+AWS_PROFILE=default aws ec2 authorize-security-group-egress \
+  --group-id <your-security-group-id> \
+  --ip-permissions '[
+    {
+      "IpProtocol":"-1",
+      "IpRanges":[{"CidrIp":"0.0.0.0/0"}],
+      "Ipv6Ranges":[{"CidrIpv6":"::/0"}]
+    }
+  ]' \
+  --region ap-south-1
+```
+
+### 7.5 Create Secrets Manager secrets
+
+```bash
+AWS_PROFILE=default aws secretsmanager create-secret \
+  --name openai-api-key \
+  --secret-string '<your-openai-api-key>' \
+  --region ap-south-1
+
+AWS_PROFILE=default aws secretsmanager create-secret \
+  --name perplexity-api-key \
+  --secret-string '<your-perplexity-api-key>' \
+  --region ap-south-1
+```
+
+Capture the returned ARNs and store them in GitHub secrets:
+- `OPENAI_SECRET_ARN`
+- `PERPLEXITY_SECRET_ARN`
+- `ECS_TASK_EXECUTION_ROLE_ARN`
+- `ECS_TASK_ROLE_ARN`
+
+---
+
+## 8. Dockerfile Build Fix Applied
 
 Build failed previously on Terraform install (`exit code: 100`) because of deprecated apt setup.
 
@@ -191,7 +359,7 @@ Key block now uses:
 
 ---
 
-## 8. ECS Existence Checks
+## 9. ECS Existence Checks
 
 Before deploy, verify ECS resources exist:
 
@@ -208,9 +376,55 @@ AWS_PROFILE=default aws ecs describe-services \
 
 If not found, create cluster/service first (one-time infra bootstrap).
 
+### 8.1 Manual Bootstrap Through GitHub Actions
+
+Use the `Bootstrap ECS Environment` workflow when you want GitHub Actions to create a temporary ECS environment before the normal CI/CD deploy job updates it.
+
+Required workflow inputs:
+- `aws_region`
+- `cluster_name`
+- `service_name`
+- `subnet_ids` as comma-separated subnet IDs
+- `security_group_ids` as comma-separated security group IDs
+- `desired_count`
+- `assign_public_ip`
+- `llm_provider`
+
+What it does:
+- ensures the ECR repository exists
+- ensures the CloudWatch log group exists
+- creates the ECS cluster if missing
+- renders and registers the ECS task definition
+- creates or updates the ECS Fargate service
+- waits for service stability
+
+### 8.2 Tear Down Temporary Environment
+
+Use the `Destroy ECS Environment` workflow when testing is complete.
+
+It can:
+- delete the ECS service
+- delete the ECS cluster
+- deregister active task definition revisions for the family
+- optionally delete the CloudWatch log group
+- optionally delete the ECR repository
+
 ---
 
-## 9. CloudTrail Debug Commands (OIDC Failures)
+## 10. Example Temporary Environment Flow
+
+1. Create `ecsTaskExecutionRole` and `ecsTaskRole`.
+2. Create or choose subnets in one VPC.
+3. Create or choose a security group in the same VPC.
+4. Create Secrets Manager secrets for OpenAI/Perplexity.
+5. Add the resulting ARNs to GitHub repository secrets.
+6. Run `Bootstrap ECS Environment`.
+7. Push to `main` to let `ci-cd.yml` update the service.
+8. Run `Destroy ECS Environment` after testing.
+
+---
+
+## 11. CloudTrail Debug Commands (OIDC Failures)
 
 Get recent `AssumeRoleWithWebIdentity` events:
 
@@ -257,4 +471,3 @@ After pipeline is stable, tighten trust policy `sub`:
 ```
 
 Keep wildcard only if you intentionally allow all refs/workflows.
-

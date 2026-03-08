@@ -1,70 +1,67 @@
-# Application Architecture 🏗️
+# Application Architecture
 
-This document describes the high-level architecture of the AWS Infrastructure Agent Bot, illustrating the flow from credential setup to multi-interface interaction and automated infrastructure provisioning.
+This is the concise architecture companion to [SYSTEM_ARCHITECTURE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/SYSTEM_ARCHITECTURE.md). It is meant for quick orientation.
 
-## 🗺️ System Overview
+## What The System Is
+
+The repository currently implements a local-first infrastructure operations console with three runtime surfaces:
+
+- `bin/agui_server.py`: primary FastAPI runtime for the browser UI
+- `bin/langchain-agent.py`: secondary CLI runtime using the same AWS MCP tool surface
+- `deployment/lambda_handler.py`: serverless wrapper for a subset of the agent flow
+
+The AGUI runtime is the most complete implementation. It includes:
+
+- SSE chat streaming
+- cloud/MCP selection
+- AWS profile-scoped identity
+- maker-checker approval flow
+- audit trail and CSV export
+- architecture parsing endpoints
+
+## The Core Architectural Decision
+
+The central decision in this codebase is to keep conversational orchestration separate from infrastructure execution.
+
+- The LLM decides which tool to call.
+- The backend decides whether a tool call is allowed to proceed.
+- The MCP server translates allowed actions into AWS-safe operations.
+- Terraform performs the durable infrastructure mutation.
+
+That separation is why the design is defensible. The model is not trusted with direct infrastructure side effects.
+
+## Current High-Level Flow
 
 ```mermaid
 graph TD
-    subgraph Setup_Phase [1. Credential Setup]
-        U[User] -->|Runs| SK[bin/setup_keychain.py]
-        SK -->|Encrypts & Stores Keys| SS{Secret Storage}
-        subgraph Secret_Storage [Storage Backends]
-            SS --> LK[Local Keyring]
-            SS --> AKV[Azure KeyVault]
-            SS --> ASM[AWS Secrets Manager]
-            SS --> ENV[.env File]
-        end
-    end
+    U[User] --> UI[Browser UI or CLI]
+    UI --> API[AGUI / CLI runtime]
+    API --> CORE[Prompt + intent policy + workflow logging]
+    CORE --> MCP[AWS Terraform MCP]
+    MCP --> RBAC[AWS RBAC and validation]
+    MCP --> TPL[Terraform template generation]
+    MCP --> TF[Terraform CLI]
+    RBAC --> AWS[AWS APIs]
+    TF --> AWS
 
-    subgraph Interface_Layers [2. Interaction Interfaces]
-        U -->|Browses to localhost:9595| UI[AG-UI Web Console]
-        U -->|Runs Terminal Command| CLI[bin/langchain-agent.py]
-    end
-
-    subgraph Core_Engine [3. Core Agent Logic]
-        UI -->|SSE / REST| AS[bin/agui_server.py - FastAPI]
-        CLI -->|Python Library| LC[LangChain Agent Engine]
-        AS --> LC
-
-        LC -->|Retrieves Keys| LC_CONF[core/llm_config.py]
-        LC_CONF --> SS
-        
-        LC -->|Natural Language Query| LLM[LLM Provider: Gemini / OpenAI / Claude]
-        LLM -->|Tool Call| LC
-    end
-
-    subgraph Execution_Layer [4. Infrastructure Provisioning]
-        LC -->|Execute Intent| MCP[AWS Terraform MCP Server]
-        MCP -->|Generates HCL| TF[Terraform Binary]
-        TF -->|Apply / Plan| AWS((AWS Cloud Infrastructure))
-        
-        subgraph Workspace [Filesystem]
-            TF <---> TWS[./terraform_workspace/]
-        end
-    end
-
-    subgraph Serverless_Deployment [5. Continuous Operations]
-        LH[deployment/lambda_handler.py] -->|Shared Logic| LC
-        CW[CloudWatch / EventBridge] -->|Trigger| LH
-    end
-
-    %% Styling
-    style U fill:#f9f,stroke:#333,stroke-width:2px
-    style AWS fill:#ff9900,stroke:#333,stroke-width:2px
-    style SS fill:#00c,color:#fff
-    style LLM fill:#4285F4,color:#fff
-    style TF fill:#623ce4,color:#fff
+    API --> AUDIT[JSONL workflow logs]
+    API --> MC[Maker-Checker queue]
+    API --> ARCH[Architecture parser endpoints]
+    ARCH --> LLM[Vision/Text LLM generation]
 ```
 
-## 🔍 Component Descriptions
+## Nuances That Matter
 
-| Component | Responsibility |
-| :--- | :--- |
-| **`bin/setup_keychain.py`** | Securely captures LLM API keys and stores them in your preferred vault (Keyring, AWS, Azure). |
-| **`core/llm_config.py`** | Central engine for provider mapping and multi-source credential retrieval. |
-| **`bin/agui_server.py`** | FastAPI backend that manages chat sessions and streams responses via Server-Sent Events (SSE). |
-| **`bin/langchain-agent.py`** | The CLI interface that provides the exact same infrastructure logic in a terminal environment. |
-| **`aws_terraform_server.py`** | The MCP server that translates LLM intents into real Terraform code and manages the deployment lifecycle. |
-| **`deployment/lambda_handler.py`** | Wraps the agent logic into a serverless function for remote triggers or API integration. |
-| **`terraform_workspace/`** | The directory where the agent generates, manages, and tracks the state of your infrastructure. |
+- AWS is real; Azure is currently a dummy MCP server used to keep the UI and routing model multi-cloud aware.
+- Mutating AWS changes are Terraform-only; the older direct CLI mutation mode is intentionally rejected.
+- boto3 is still used, but mainly for identity, inventory, permission simulation, cost data, and ECS validation.
+- The browser UI is not cosmetic. It is where identity context, approvals, audit, and streamed tool execution are exposed.
+- Conversation state is in-memory, while audit state is file-backed JSONL.
+- Diagram-driven deployment exists, but it is a secondary workflow beside the main chat runtime.
+
+## Reference Files
+
+- [SYSTEM_ARCHITECTURE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/SYSTEM_ARCHITECTURE.md)
+- [functional-architecture.puml](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/diagrams/functional-architecture.puml)
+- [terraform-infra-sequence.puml](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/diagrams/terraform-infra-sequence.puml)
+- [maker-checker-sequence.puml](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/diagrams/maker-checker-sequence.puml)

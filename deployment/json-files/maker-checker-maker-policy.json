@@ -1,0 +1,55 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowReadOnlyDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "rds:Describe*",
+        "lambda:List*",
+        "lambda:Get*",
+        "ecs:Describe*",
+        "ecs:List*",
+        "s3:ListAllMyBuckets",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "iam:GetUser",
+        "iam:GetRole",
+        "iam:ListRoles",
+        "iam:ListAttachedRolePolicies",
+        "ce:GetCostAndUsage",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyMutatingApiCalls",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:Create*",
+        "ec2:Modify*",
+        "ec2:Delete*",
+        "rds:Create*",
+        "rds:Modify*",
+        "rds:Delete*",
+        "lambda:Create*",
+        "lambda:Update*",
+        "lambda:Delete*",
+        "ecs:Create*",
+        "ecs:Update*",
+        "ecs:Delete*",
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "iam:Create*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Detach*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

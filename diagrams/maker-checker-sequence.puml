@@ -1,0 +1,68 @@
+@startuml
+title Maker-Checker Approval Path For AWS Terraform Changes
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+actor Maker
+actor Checker
+participant "Browser UI\n(ui/app.js)" as UI
+participant "AGUI Backend" as API
+participant "Run Loop" as RUNNER
+participant "Maker-Checker Queue" as MCQ
+participant "AWS MCP" as MCP
+participant "Terraform / AWS" as EXEC
+
+Maker -> UI : request mutating AWS action
+UI -> API : POST /api/run
+API -> RUNNER : resolve active profile
+RUNNER -> RUNNER : _maker_checker_should_gate(...)
+
+alt maker or gated profile
+  RUNNER -> MCQ : create request with tool, args,\nrequester, and preview
+  MCQ --> RUNNER : pending request
+  RUNNER --> UI : MAKER_CHECKER_REQUEST
+  RUNNER --> UI : Awaiting Approval state
+else checker profile
+  RUNNER -> MCP : execute immediately
+end
+
+Checker -> UI : open queue item
+UI -> API : GET /api/maker-checker/request/{id}
+API --> UI : request + comments + plan preview
+
+opt discussion
+  Maker -> UI : add comment
+  UI -> API : POST /api/maker-checker/comment
+  API -> MCQ : append comment
+  API --> UI : updated thread
+
+  Checker -> UI : add comment
+  UI -> API : POST /api/maker-checker/comment
+  API -> MCQ : append comment
+  API --> UI : updated thread
+end
+
+Checker -> UI : approve or reject
+UI -> API : POST /api/maker-checker/approve or reject
+API -> MCQ : update status
+API --> UI : updated workflow
+
+Checker -> UI : execute approved request
+UI -> API : POST /api/maker-checker/execute
+API -> MCQ : mark executing
+API -> MCP : execute queued tool as checker profile
+MCP -> EXEC : terraform and/or AWS calls
+EXEC --> MCP : execution output
+MCP --> API : result
+API -> MCQ : store execution_result
+API --> UI : executed or failed state
+
+note right of API
+The queued item preserves the exact tool
+name and arguments. Approval does not ask
+the model to regenerate the action.
+end note
+
+@enduml

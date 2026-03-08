@@ -1,48 +1,106 @@
-# AWS Infrastructure Agent - Terraform MCP Guide
+# AWS Terraform MCP Guide
 
-This project now includes a Model Context Protocol (MCP) server for AWS Infrastructure provisioning via Terraform.
+This guide documents the implemented AWS MCP backend in this repository, not a generic future-state design.
 
-## Features
-- **Natural Language Infrastructure**: "Deploy a production-grade VPC and an RDS database."
-- **RBAC Integration**: Automatically checks your AWS IAM permissions using the IAM Policy Simulator.
-- **Terraform-First Provisioning**: Infrastructure creation is Terraform-only, with guided `create_* -> terraform_plan -> terraform_apply` workflows.
-- **Production-Grade Templates**: 
-  - **Multi-AZ VPC**: Optimized network layout with public/private subnets.
-  - **RDS PostgreSQL**: Managed database provisioning with security defaults (Terraform only).
-  - **AWS Lambda**: Automated function creation including boilerplate code and IAM roles (Terraform only).
-  - **EC2 with Security Groups**: Automatic firewall provisioning for SSH and HTTP.
+## What The AWS MCP Server Actually Does
 
-## Prerequisites
-1. **Terraform CLI**: Must be installed and available in the system PATH.
-2. **AWS Credentials**: Must be configured (via `~/.aws/credentials`, Environment Variables, or the Project Keychain).
-3. **IAM Permissions**: The user must have sufficient permissions to simulate policies and manage resources.
+`mcp_servers/aws_terraform_server.py` exposes the tool contract used by the AGUI runtime and the CLI runtime.
 
-## Usage
-1. Start the server: `python3 bin/agui_server.py`
-2. Open the UI: [http://localhost:9595](http://localhost:9595)
-3. Select **"AWS Infrastructure (Terraform)"** from the MCP Server dropdown in the header.
-4. Select your preferred LLM (e.g., OpenAI or Claude).
-5. Ask the agent to build something:
-   - *"Provision a public S3 bucket named my-company-data-exports in us-east-1"*
-   - *"Set up a VPC with public and private subnets"*
-   - *"Deploy a t2.micro instance for testing"*
+It currently supports:
 
-## How it Works
-1. **Tool Binding**: When you select the MCP server, the backend retrieves a list of infrastructure tools from the `MCPAWSTerraformServer`.
-2. **LLM Invocation**: The LLM (LangChain) is "bound" with these tools.
-3. **Execution Loop**:
-   - The LLM outputs a tool call (e.g., `create_s3_bucket`).
-   - The backend executes the tool via the MCP server.
-   - The MCP server generates Terraform HCL, runs `terraform init`, and prepares the project.
-   - The result is sent back to the LLM.
-4. **Conversational Feedback**: The LLM confirms the operation and provides details (like public IPs or bucket names).
+- read-only inventory and resource inspection
+- Cost Explorer summaries
+- guided ECS deployment workflow collection and validation
+- Terraform-backed creation of EC2, S3, VPC, RDS, Lambda, and ECS resources
+- Terraform plan, apply, destroy, and state inspection
 
-## Security & RBAC
-- **Credential Source**: Uses the project's centralized `core/llm_config.py` logic to source AWS credentials.
-- **Simulation First**: Before running Terraform, the MCP server calls `iam:SimulatePrincipalPolicy` to ensure the user is authorized.
-- **Safe State**: Terraform state and project files are managed in `./terraform_workspace/`.
+## Why The Design Is Terraform-First
 
-## Troubleshooting
-- **"Terraform not found"**: Ensure the `terraform` binary is installed (`brew install terraform` on macOS).
-- **"Unauthorized"**: Check your AWS credentials and ensure you have permissions to the resources you are trying to create.
-- **Logs**: Monitor `logs/agui_server.log` for detailed execution logs of both the LLM and the Terraform commands.
+The server is intentionally Terraform-first for mutating AWS actions.
+
+- `create_*` tools generate HCL and write to `terraform_workspace/<project_name>/main.tf`
+- `terraform_plan` produces `tfplan`
+- `terraform_apply` prefers applying the saved plan file
+- `terraform_destroy` operates on the same project directory
+
+This choice gives the system:
+
+- a reviewable artifact on disk
+- a stable project name that can be passed across tool calls
+- a natural maker-checker review point
+- better reproducibility than direct imperative CLI mutation
+
+The code explicitly rejects older non-Terraform mutation modes.
+
+## What Boto3 Still Does
+
+Terraform is not the whole story. boto3 remains important in the AWS MCP layer for:
+
+- STS caller identity
+- IAM permission simulation
+- allowed region discovery
+- account inventory reads
+- resource description
+- ECS prerequisite validation for subnets, security groups, and IAM roles
+- Cost Explorer queries
+
+That split is intentional. Terraform handles durable infra changes; boto3 handles validation, discovery, and AWS context.
+
+## Runtime Flow
+
+1. The AGUI or CLI runtime binds the MCP tool schemas to the selected LLM.
+2. The LLM emits a tool call.
+3. The backend may block it due to read-only intent or maker-checker gating.
+4. The AWS MCP server executes the allowed tool.
+5. Terraform runs with credentials injected from the active boto3 session.
+6. Results are returned to the runtime and surfaced to the user.
+
+## Important Nuances
+
+### Active Credentials
+
+`AWSRBACManager.get_credentials_env()` freezes the current boto3 session credentials and passes them to Terraform subprocesses. `TerraformManager` removes `AWS_PROFILE` from the subprocess environment so explicit credentials win.
+
+This is important because the UI supports client-scoped profile switching, and Terraform must follow the same effective identity.
+
+### ECS Flow Is More Guarded Than The Simple Templates
+
+The ECS toolchain is not a single blind template render. The server includes:
+
+- `start_ecs_deployment_workflow`
+- `update_ecs_deployment_workflow`
+- `review_ecs_deployment_workflow`
+- `create_ecs_service`
+
+Before creation, the MCP server validates:
+
+- subnet existence
+- security group existence
+- VPC consistency between subnets and security groups
+- IAM role ARN plausibility and availability
+
+This is one of the clearest examples of why the MCP layer exists as more than a thin Terraform wrapper.
+
+### Plan-To-Apply Continuity
+
+The AGUI backend keeps track of the last successfully planned project and can repair an incorrect `project_name` sent by the model to `terraform_apply` if a valid `tfplan` already exists for the last planned project.
+
+That is an implementation-level reliability patch around LLM tool drift.
+
+### Terraform State Is Local By Default
+
+The generated projects in this repository do not automatically configure a remote backend. Unless a generated template includes one, Terraform state stays local to the workspace directory. This is fine for local operations and development, but it should be called out in any production review.
+
+## Operational Requirements
+
+- Terraform CLI installed and on `PATH`
+- AWS credentials resolvable via the selected profile/session
+- sufficient IAM permissions for both boto3 reads and Terraform actions
+- writable local workspace for `terraform_workspace/`
+
+## Related Files
+
+- [aws_terraform_server.py](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/mcp_servers/aws_terraform_server.py)
+- [terraform.py](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/mcp_servers/aws_terraform/terraform.py)
+- [rbac.py](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/mcp_servers/aws_terraform/rbac.py)
+- [templates.py](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/mcp_servers/aws_terraform/templates.py)

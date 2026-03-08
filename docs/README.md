@@ -1,102 +1,33 @@
-# AWS Infrastructure Agent Bot 🤖🚀
+# Documentation Index
 
-An advanced AI-powered agent designed to provision and manage AWS infrastructure based on natural language requirements. Built using **LangChain**, **Model Context Protocol (MCP)**, and **Terraform**, this agent provides a seamless bridge between human intent and production-ready cloud resources.
+This documentation set is centered on the current implementation, where the browser-based AGUI runtime is the primary operational path and the AWS Terraform MCP server is the primary execution backend.
 
-## 🌟 True Purpose
-The primary goal of this project is to empower users to build and manage complex AWS infrastructure by simply describing their requirements in plain English. The agent handles the heavy lifting of generating Terraform configurations, planning changes, and safely executing deployments.
+## Start Here
 
-## List of typical actions this agent can perform
-[x] Who are you?
-[x] What can you do for me?
-[x] Create an EC2 instance [follow up questions to be answered]
-[x] Use this mermaid code and build the infrastructure [provide a valid mermaid diagram for AWS]
-[x] List all AWS resources in my account
-[x] Who is the audience for this agent?
----
+- [SYSTEM_ARCHITECTURE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/SYSTEM_ARCHITECTURE.md): full architecture, rationale, nuances, and embedded PlantUML diagrams.
+- [ARCHITECTURE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/ARCHITECTURE.md): short-form architecture summary.
+- [TERRAFORM_MCP_GUIDE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/TERRAFORM_MCP_GUIDE.md): AWS MCP and Terraform execution model.
+- [MAKER_CHECKER_IAM.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/MAKER_CHECKER_IAM.md): maker-checker roles and runtime behavior.
 
-## ✨ Key Features
+## Current System Positioning
 
-### 🏗️ AWS Infrastructure as Code (IaC)
-- **Terraform Integration:** Automatically generates, plans, and applies Terraform configurations with environment-aware execution.
-- **Production Templates:** Sophisticated patterns for **Multi-AZ VPCs**, **RDS PostgreSQL**, **AWS Lambda**, and EC2 with automatic Security Group provisioning.
-- **Safe Execution:** Implements a "Plan-First" workflow with raw tool output visibility and `-input=false` protection for stable deployments.
+The repo currently contains four major capabilities:
 
-### 🖥️ AG-UI Console (Web Interface)
-- **Real-time Streaming:** Uses Server-Sent Events (SSE) for a fast, token-by-token interactive chat experience.
-- **AWS Profile Selector:** Dynamically switch between AWS CLI profiles (SSO support included) directly from the UI.
-- **Identity Awareness:** Real-time verification of the active AWS Account ID and IAM User/Role in the header.
+1. Chat-driven infrastructure operations through `bin/agui_server.py` and `ui/*`
+2. Terraform-backed AWS execution through `mcp_servers/aws_terraform_server.py`
+3. Governance workflows through maker-checker APIs and audit logs
+4. Secondary architecture-driven workflows through `/api/architecture/*`
 
-### 🤖 Advanced CLI Agent
-- **Infrastructure Ready:** The `bin/langchain-agent.py` CLI is a full-featured infrastructure engine, supporting the same tool-calling loops as the Web UI.
-- **Identity Check:** Automatically verifies AWS session health and profile context on startup.
-- **Multi-LLM Setup:** centralized `bin/setup_keychain.py` for configuring OpenAI, Gemini, Perplexity, and more.
+The key implementation nuance is that architecture-driven deployment is no longer the main story. The most mature path is the chat console with streamed tool execution, AWS identity awareness, approval gating, and audit visibility.
 
----
+## Supporting Documents
 
-## 🚀 Getting Started
+- [CREDENTIAL_STORAGE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/CREDENTIAL_STORAGE.md)
+- [CLI_GUIDE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/CLI_GUIDE.md)
+- [LOGGING_GUIDE.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/LOGGING_GUIDE.md)
+- [REGRESSION_TESTING.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/REGRESSION_TESTING.md)
+- [DEVOPS_SETUP.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/docs/DEVOPS_SETUP.md)
 
-### 📦 Prerequisites
-- **Python 3.9+**
-- **Terraform** installed on your system.
-- **AWS CLI** configured (`aws configure` or SSO).
+## Diagrams
 
-### 🛠️ Installation
-1. **Clone the repository:**
-   ```bash
-   git clone <repo-url>
-   cd aws-infra-agent-bot
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Setup API Keys:**
-   ```bash
-   python3 bin/setup_keychain.py
-   ```
-   Choose your preferred storage (Local Keyring, AWS, or Azure) and enter your LLM API keys (e.g., Anthropic, OpenAI).
-
-### 🏃 Running the Agent
-1. **Start the Backend Server:**
-   ```bash
-   python3 bin/agui_server.py
-   ```
-2. **Open the UI:**
-   Navigate to `http://localhost:9595` in your browser.
-
----
-
-## 📖 How to Use
-
-1. **Authenticate:** Click **"CLI Login"** in the top bar to ensure the agent has access to your AWS session.
-2. **Select MCP:** Ensure **"AWS Infrastructure (Terraform)"** is selected in the MCP Server dropdown.
-3. **Describe Infrastructure:**
-   - *"Build a VPC in us-east-1 with a public and private subnet."*
-   - *"Create a t3.micro EC2 instance with port 80 open."*
-4. **Review & Apply:**
-   - The agent will generate the config and show you a **Terraform Plan**.
-   - Type *"Apply it"* or *"Go ahead"* to execute the deployment.
-   - Monitor the **Dark Tool Box** for real-time success/error logs from Terraform.
-
----
-
-## 🏗️ Project Structure
-- `bin/agui_server.py`: FastAPI backend handling model routing and tool execution.
-- `mcp_servers/`: Contains the AWS/Terraform MCP server implementation.
-- `ui/`: Modern web frontend (HTML/JS/CSS).
-- `core/llm_config.py`: Centralized LLM and credential management.
-- `terraform_workspace/`: Local directory where the agent generates and manages IaC code.
-
----
-
-## 🛡️ Best Practices
-- **Plan Review:** Always review the Terraform Plan output before giving the final "apply" command.
-- **Least Privilege:** Ensure your AWS CLI user has only the necessary permissions for the resources you intend to build.
-- **Cleanup:** Use the agent to *"destroy the infrastructure"* when you are finished testing to avoid unnecessary AWS costs.
-
----
-
-## 📜 License
-MIT
+The live diagram sources are under [diagrams/README.md](/Users/parag.kulkarni/ai-workspace/aws-infra-agent-bot/diagrams/README.md).

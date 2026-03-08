@@ -150,5 +150,3 @@ class AWSRBACManager:
         except Exception as e:
             logger.warning(f"Error querying security groups in {region}: {e}")
             return None
-
-

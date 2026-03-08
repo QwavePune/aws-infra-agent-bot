@@ -1,0 +1,105 @@
+@startuml
+title AWS Infra Agent Bot - Implemented Functional Architecture
+
+skinparam backgroundColor white
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment left
+
+actor User
+
+package "Browser UI\n(ui/index.html, ui/app.js, ui/app.css)" as UI {
+  [Console SPA] as SPA
+  [Audit Trail View] as AUDIT
+  [Maker-Checker Modals] as MCMODAL
+  [AWS Login Modal] as LOGINMODAL
+}
+
+package "FastAPI Runtime\n(bin/agui_server.py)" as API {
+  [Run Agent SSE Loop] as RUNNER
+  [Conversation Store] as CONV
+  [Client Profile Context] as PROFILE
+  [Maker-Checker Queue] as MCQ
+  [Audit Query / Export] as AUDAPI
+  [Architecture Endpoints] as ARCHAPI
+}
+
+package "Core Modules\n(core/*)" as CORE {
+  [LLM Config] as LLMCFG
+  [Agent Protocol] as PROTO
+  [Intent Policy] as POLICY
+  [Workflow Logger] as WFLOG
+  [Architecture Parser] as PARSER
+  [Capabilities Helpers] as CAPS
+}
+
+package "MCP Servers\n(mcp_servers/*)" as MCP {
+  [AWS Terraform MCP] as AWSMCP
+  [Azure Terraform MCP\n(dummy)] as AZMCP
+}
+
+package "AWS Terraform Domain\n(mcp_servers/aws_terraform/*)" as AWSD {
+  [RBAC Manager] as RBAC
+  [Terraform Manager] as TFM
+  [Template Library] as TPL
+}
+
+database "Workspace Files" as FS {
+  [terraform_workspace/] as TFWORK
+  [logs/workflow_execution_log/] as WFSTORE
+  [logs/maker_checker_roles.json] as ROLEFILE
+}
+
+cloud "External Systems" as EXT {
+  [LLM Providers] as LLM
+  [AWS CLI] as AWSCLI
+  [Terraform CLI] as TFCLI
+  [AWS APIs via boto3/provider] as AWS
+}
+
+User --> SPA : chat / approvals / audit / login
+SPA --> RUNNER : POST /api/run\nSSE response stream
+SPA --> AUDAPI : audit queries / export
+SPA --> MCQ : approval actions through API
+SPA --> PROFILE : profile changes through API
+SPA --> ARCHAPI : parse / generate / deploy
+
+RUNNER --> CONV : thread history
+RUNNER --> PROFILE : active AWS profile
+RUNNER --> LLMCFG : initialize model
+RUNNER --> PROTO : prompt + tool extraction
+RUNNER --> POLICY : read-only guardrails
+RUNNER --> CAPS : capability and audience replies
+RUNNER --> WFLOG : structured events
+RUNNER --> AWSMCP : real AWS tools
+RUNNER --> AZMCP : placeholder Azure tools
+
+AWSMCP --> RBAC : identity / permissions / regions
+AWSMCP --> TPL : generate HCL templates
+AWSMCP --> TFM : init / plan / apply / destroy
+AWSMCP --> AWS : inventory / describe /\nECS prereq validation
+
+TFM --> TFCLI : terraform commands
+TFM --> TFWORK : project files + tfplan
+RBAC --> AWSCLI : profile-backed auth context
+RBAC --> AWS : STS / IAM / EC2 / Cost Explorer / ECS
+WFLOG --> WFSTORE : JSONL log events
+AUDAPI --> WFSTORE : read audit history
+MCQ --> ROLEFILE : checker / maker configuration
+ARCHAPI --> PARSER : diagram workflows
+PARSER --> LLM : vision + Terraform generation
+
+note right of RUNNER
+Primary runtime is chat-first and SSE-driven.
+The backend, not the model, enforces
+profile routing, maker-checker gating,
+and read-only blocking.
+end note
+
+note right of ARCHAPI
+Architecture parsing exists as a secondary
+workflow. It is not the main control plane.
+end note
+
+@enduml

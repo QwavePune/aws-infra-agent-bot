@@ -25,6 +25,10 @@ from core.capabilities import (
     is_capabilities_request,
     is_audience_request,
     build_audience_response,
+    is_maker_checker_request,
+    build_maker_checker_response,
+    is_out_of_scope_request,
+    build_out_of_scope_response,
 )
 from core.intent_policy import detect_read_only_intent, is_mutating_tool
 from core.llm_config import (
@@ -498,6 +502,32 @@ while True:
                 source="cli",
                 run_id=run_id,
                 metadata={"class": "CLI", "method": "build_audience_response"},
+            )
+            continue
+
+        if is_maker_checker_request(user_query):
+            print("\nAgent:")
+            print("-" * 60)
+            print(build_maker_checker_response())
+            workflow_event(
+                workflow_logger,
+                "maker_checker_response_generated",
+                source="cli",
+                run_id=run_id,
+                metadata={"class": "CLI", "method": "build_maker_checker_response"},
+            )
+            continue
+
+        if is_out_of_scope_request(user_query):
+            print("\nAgent:")
+            print("-" * 60)
+            print(build_out_of_scope_response())
+            workflow_event(
+                workflow_logger,
+                "out_of_scope_request_blocked",
+                source="cli",
+                run_id=run_id,
+                metadata={"class": "CLI", "method": "build_out_of_scope_response"},
             )
             continue
 

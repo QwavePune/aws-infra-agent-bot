@@ -6,6 +6,7 @@ const clearFiltersBtn = document.getElementById("clearFiltersBtn");
 const exportBtn = document.getElementById("exportBtn");
 const tableBody = document.getElementById("auditTableBody");
 const entryCount = document.getElementById("entryCount");
+const refreshAuditBtn = document.getElementById("refreshAuditBtn");
 
 const totalActions = document.getElementById("totalActions");
 const successfulActions = document.getElementById("successfulActions");
@@ -28,7 +29,8 @@ if (
   !userFilter ||
   !clearFiltersBtn ||
   !exportBtn ||
-  !tableBody
+  !tableBody ||
+  !refreshAuditBtn
 ) {
   throw new Error("Audit UI elements are missing from the page.");
 }
@@ -157,6 +159,29 @@ clearFiltersBtn.addEventListener("click", () => {
 exportBtn.addEventListener("click", () => {
   const query = buildQuery();
   window.location.href = `/api/audit/export?${query}`;
+});
+
+refreshAuditBtn.addEventListener("click", () => {
+  fetchAuditLogs().catch((err) => {
+    tableBody.innerHTML = `<tr><td colspan="7">${escapeHtml(err.message)}</td></tr>`;
+  });
+});
+
+window.addEventListener("agui:viewchange", (event) => {
+  const view = event?.detail?.view;
+  if (view === "audit") {
+    fetchAuditLogs().catch(() => {});
+  }
+});
+
+window.addEventListener("focus", () => {
+  fetchAuditLogs().catch(() => {});
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    fetchAuditLogs().catch(() => {});
+  }
 });
 
 fetchAuditLogs().catch((err) => {

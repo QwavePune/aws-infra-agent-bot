@@ -27,6 +27,17 @@
 
     <main id="consoleView" class="layout">
       <aside class="left-rail">
+        <section class="rail-card conversations-card">
+          <div class="conversations-header">
+            <h3>Conversations</h3>
+            <button type="button" id="newChatBtn" class="btn-primary btn-small">New Chat</button>
+          </div>
+          <p class="rail-help">Personal chat history is stored on local disk for this AGUI environment and restored on reload.</p>
+          <div id="conversationList" class="conversation-list">
+            <div class="conversation-empty">Loading conversations...</div>
+          </div>
+        </section>
+
         <section class="rail-card">
           <h3>Runtime</h3>
           <div class="control-grid">

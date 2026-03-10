@@ -51,8 +51,11 @@ const mcCheckerProfilesList = document.getElementById("mcCheckerProfilesList");
 const mcMakerProfilesList = document.getElementById("mcMakerProfilesList");
 const mcIamUsersList = document.getElementById("mcIamUsersList");
 const mcSaveRolesBtn = document.getElementById("mcSaveRolesBtn");
+const conversationList = document.getElementById("conversationList");
+const newChatBtn = document.getElementById("newChatBtn");
 
 const AGUI_CLIENT_ID_KEY = "aguiClientId";
+const ACTIVE_THREAD_ID_KEY = "aguiActiveThreadId";
 let aguiClientId = localStorage.getItem(AGUI_CLIENT_ID_KEY);
 if (!aguiClientId) {
   aguiClientId = crypto.randomUUID();
@@ -72,7 +75,7 @@ const identityHelp = document.getElementById("identityHelp");
 const quickActions = document.getElementById("quickActions");
 const welcomeMessage = document.getElementById("welcomeMessage");
 
-let threadId = crypto.randomUUID();
+let threadId = localStorage.getItem(ACTIVE_THREAD_ID_KEY) || "";
 let currentAssistantBubble = null;
 let pendingStart = null;
 let currentView = "console";
@@ -84,6 +87,7 @@ let runTimerInterval = null;
 let runStartedAt = null;
 let makerCheckerRolesCache = null;
 let awsIdentityPollAttempts = 0;
+let conversationSummaries = [];
 const TOOL_OUTPUT_MODE_KEY = "aguiToolOutputMode";
 
 const MODEL_SEPARATOR = "::";
@@ -325,6 +329,166 @@ const addMessage = (role, content) => {
   chatStream.appendChild(message);
   chatStream.scrollTop = chatStream.scrollHeight;
   return body;
+};
+
+const setActiveThreadId = (nextThreadId) => {
+  threadId = nextThreadId || "";
+  if (threadId) {
+    localStorage.setItem(ACTIVE_THREAD_ID_KEY, threadId);
+  } else {
+    localStorage.removeItem(ACTIVE_THREAD_ID_KEY);
+  }
+};
+
+const clearChatStream = () => {
+  chatStream.innerHTML = "";
+  currentAssistantBubble = null;
+};
+
+const renderWelcomeState = () => {
+  clearChatStream();
+  addMessage(
+    "assistant",
+    (welcomeMessage?.textContent || "").trim() ||
+      "Welcome back. I can guide infrastructure workflows and execute MCP tools in real time."
+  );
+};
+
+const formatConversationTimestamp = (rawValue) => {
+  if (!rawValue) return "";
+  const value = new Date(rawValue);
+  if (Number.isNaN(value.getTime())) return "";
+  return value.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+const renderConversationList = () => {
+  if (!conversationList) return;
+
+  if (!conversationSummaries.length) {
+    conversationList.innerHTML = '<div class="conversation-empty">No saved chats yet. Start a new conversation.</div>';
+    return;
+  }
+
+  conversationList.innerHTML = conversationSummaries
+    .map((item) => {
+      const isActive = item.thread_id === threadId;
+      const title = escapeHtml(item.title || "New chat");
+      const preview = escapeHtml(item.preview || "No messages yet");
+      const stamp = escapeHtml(formatConversationTimestamp(item.updated_at || item.created_at));
+      const count = Number(item.message_count || 0);
+      return `
+        <button type="button" class="conversation-item${isActive ? " active" : ""}" data-thread-id="${escapeHtml(item.thread_id)}">
+          <div class="conversation-item-main">
+            <div class="conversation-item-title">${title}</div>
+            <div class="conversation-item-preview">${preview}</div>
+            <div class="conversation-item-meta">${count} messages${stamp ? ` • ${stamp}` : ""}</div>
+          </div>
+          <span class="conversation-delete" data-delete-thread="${escapeHtml(item.thread_id)}" title="Delete conversation">×</span>
+        </button>
+      `;
+    })
+    .join("");
+
+  conversationList.querySelectorAll("[data-thread-id]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const deleteTarget = event.target.closest("[data-delete-thread]");
+      if (deleteTarget) return;
+      const nextThreadId = button.getAttribute("data-thread-id");
+      if (!nextThreadId || nextThreadId === threadId) return;
+      setView("console");
+      await loadConversation(nextThreadId);
+    });
+  });
+
+  conversationList.querySelectorAll("[data-delete-thread]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const targetThreadId = button.getAttribute("data-delete-thread");
+      if (!targetThreadId) return;
+      await deleteConversation(targetThreadId);
+    });
+  });
+};
+
+const loadConversationSummaries = async () => {
+  const response = await fetch("/api/conversations");
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Unable to load conversations");
+  }
+  conversationSummaries = data.conversations || [];
+  renderConversationList();
+  return conversationSummaries;
+};
+
+const renderConversationMessages = (messages = []) => {
+  clearChatStream();
+  const visible = (messages || []).filter((message) => {
+    const role = String(message.role || "");
+    return (role === "user" || role === "assistant") && String(message.content || "").trim();
+  });
+  if (!visible.length) {
+    renderWelcomeState();
+    return;
+  }
+  visible.forEach((message) => addMessage(message.role, message.content || ""));
+};
+
+async function loadConversation(nextThreadId) {
+  if (!nextThreadId) return;
+  const response = await fetch(`/api/conversations/${encodeURIComponent(nextThreadId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Unable to load conversation");
+  }
+  setActiveThreadId(data.thread_id || nextThreadId);
+  renderConversationMessages(data.messages || []);
+  renderConversationList();
+}
+
+const createConversation = async ({ switchToNew = true } = {}) => {
+  const response = await fetch("/api/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Unable to create conversation");
+  }
+  await loadConversationSummaries();
+  if (switchToNew) {
+    setActiveThreadId(data.thread_id);
+    renderConversationMessages([]);
+    renderConversationList();
+    setView("console");
+    promptInput.focus();
+  }
+  return data;
+};
+
+const deleteConversation = async (targetThreadId) => {
+  const response = await fetch(`/api/conversations/${encodeURIComponent(targetThreadId)}`, {
+    method: "DELETE",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    addMessage("assistant", data.detail || "Unable to delete conversation.");
+    return;
+  }
+  const deletedActive = targetThreadId === threadId;
+  await loadConversationSummaries();
+  if (!deletedActive) {
+    return;
+  }
+  const fallback = conversationSummaries[0];
+  if (fallback?.thread_id) {
+    await loadConversation(fallback.thread_id);
+    return;
+  }
+  setActiveThreadId("");
+  await createConversation({ switchToNew: true });
 };
 
 const fetchMakerCheckerConfig = async () => {
@@ -931,6 +1095,9 @@ const parseSse = async (response, onEvent) => {
 const sendMessage = async (message) => {
   const trimmed = message.trim();
   if (!trimmed) return;
+  if (!threadId) {
+    await createConversation({ switchToNew: true });
+  }
 
   addMessage("user", trimmed);
   promptInput.value = "";
@@ -1035,6 +1202,9 @@ const sendMessage = async (message) => {
         updateLatency(startedAt);
         stopRunTimer("Idle");
         sendBtn.disabled = false;
+        loadConversationSummaries().catch((error) => {
+          console.error("Failed to refresh conversations", error);
+        });
       }
     });
   } catch (error) {
@@ -1459,6 +1629,17 @@ if (mcRefreshBtn) {
   });
 }
 
+if (newChatBtn) {
+  newChatBtn.addEventListener("click", async () => {
+    try {
+      await createConversation({ switchToNew: true });
+    } catch (error) {
+      console.error("Failed to create conversation", error);
+      addMessage("assistant", "Unable to start a new conversation right now.");
+    }
+  });
+}
+
 if (navAuditBtn) {
   navAuditBtn.addEventListener("click", () => setView("audit"));
 }
@@ -1506,14 +1687,36 @@ window.addEventListener("hashchange", () => {
 
 setInterval(refreshAwsIdentity, 30000);
 
-loadModels();
-applyCloudContext();
-loadCapabilities();
-refreshMakerCheckerQueue();
-if (window.location.hash === "#audit") {
-  setView("audit", false);
-} else if (window.location.hash === "#faq") {
-  setView("faq", false);
-} else {
-  setView("console", false);
-}
+const initializeApp = async () => {
+  loadModels();
+  applyCloudContext();
+  loadCapabilities();
+  refreshMakerCheckerQueue();
+
+  try {
+    await loadConversationSummaries();
+    const preferredThreadId =
+      (threadId && conversationSummaries.find((item) => item.thread_id === threadId)?.thread_id) ||
+      conversationSummaries[0]?.thread_id;
+
+    if (preferredThreadId) {
+      await loadConversation(preferredThreadId);
+    } else {
+      await createConversation({ switchToNew: true });
+    }
+  } catch (error) {
+    console.error("Failed to initialize conversation history", error);
+    renderWelcomeState();
+    addMessage("assistant", "Conversation history is unavailable right now. You can still start a new chat.");
+  }
+
+  if (window.location.hash === "#audit") {
+    setView("audit", false);
+  } else if (window.location.hash === "#faq") {
+    setView("faq", false);
+  } else {
+    setView("console", false);
+  }
+};
+
+initializeApp();

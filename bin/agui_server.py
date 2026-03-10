@@ -42,7 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage, message_to_dict, messages_from_dict
 from core.llm_config import SUPPORTED_LLMS, initialize_llm
 from core.capabilities import (
     is_capabilities_request,
@@ -86,6 +86,12 @@ MCP_AVAILABLE = AWS_MCP_AVAILABLE or AZURE_MCP_AVAILABLE
 
 LOG_DIR = os.path.join(APP_ROOT, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
+CHAT_HISTORY_DIR = os.path.join(LOG_DIR, "chat_sessions")
+os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
+AUDIT_DIR = os.path.join(LOG_DIR, "audit_trail")
+os.makedirs(AUDIT_DIR, exist_ok=True)
+AUDIT_LEDGER_PATH = os.path.join(AUDIT_DIR, "audit_entries.jsonl")
+MAKER_CHECKER_STATE_PATH = os.path.join(LOG_DIR, "maker_checker_requests.json")
 
 # Configure logging
 LOG_FILE = os.path.join(LOG_DIR, 'agui_server.log')
@@ -112,9 +118,11 @@ logger.info(f"UI Directory: {UI_DIR}")
 logger.info("=" * 80)
 
 conversation_store: Dict[str, List] = {}
+conversation_history_lock = threading.Lock()
 llm_cache: Dict[str, object] = {}
 maker_checker_lock = threading.Lock()
 maker_checker_requests: Dict[str, Dict[str, Any]] = {}
+audit_ledger_lock = threading.Lock()
 client_profile_lock = threading.Lock()
 client_active_profiles: Dict[str, str] = {}
 
@@ -235,6 +243,162 @@ def _current_profile(request: Optional[Request] = None) -> str:
         if profile:
             return profile
     return os.environ.get("AWS_PROFILE", "default")
+
+
+def _message_text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part).strip()
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _client_storage_id(client_key: str) -> str:
+    return hashlib.sha1(str(client_key or "global").encode("utf-8")).hexdigest()
+
+
+def _client_history_dir(client_key: str) -> str:
+    path = os.path.join(CHAT_HISTORY_DIR, _client_storage_id(client_key))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _thread_cache_key(client_key: str, thread_id: str) -> str:
+    return f"{_client_storage_id(client_key)}:{thread_id}"
+
+
+def _thread_file_path(client_key: str, thread_id: str) -> str:
+    safe_thread_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(thread_id or "thread"))
+    return os.path.join(_client_history_dir(client_key), f"{safe_thread_id}.json")
+
+
+def _conversation_title_from_messages(messages: List[Any]) -> str:
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            text = " ".join(_message_text_content(message.content).split())
+            if text:
+                return text[:72]
+    return "New chat"
+
+
+def _conversation_preview_from_messages(messages: List[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, (HumanMessage, AIMessage)):
+            text = " ".join(_message_text_content(message.content).split())
+            if text:
+                return text[:120]
+    return "No messages yet"
+
+
+def _visible_messages(messages: List[Any]) -> List[Dict[str, str]]:
+    rendered: List[Dict[str, str]] = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            rendered.append({"role": "user", "content": _message_text_content(message.content)})
+        elif isinstance(message, AIMessage):
+            text = _message_text_content(message.content)
+            if text:
+                rendered.append({"role": "assistant", "content": text})
+    return rendered
+
+
+def _conversation_record(thread_id: str, messages: List[Any], created_at: Optional[str] = None) -> Dict[str, Any]:
+    visible = _visible_messages(messages)
+    updated_at = _utc_iso_now()
+    return {
+        "thread_id": thread_id,
+        "title": _conversation_title_from_messages(messages),
+        "preview": _conversation_preview_from_messages(messages),
+        "created_at": created_at or updated_at,
+        "updated_at": updated_at,
+        "message_count": len(visible),
+        "messages": [message_to_dict(message) for message in messages],
+    }
+
+
+def _load_thread_payload(client_key: str, thread_id: str) -> Optional[Dict[str, Any]]:
+    path = _thread_file_path(client_key, thread_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return None
+        return payload
+    except Exception as e:
+        logger.warning(f"Failed to load conversation thread '{thread_id}': {e}")
+        return None
+
+
+def _load_conversation_history(client_key: str, thread_id: str) -> List[Any]:
+    cache_key = _thread_cache_key(client_key, thread_id)
+    with conversation_history_lock:
+        cached = conversation_store.get(cache_key)
+        if cached is not None:
+            return cached
+        payload = _load_thread_payload(client_key, thread_id)
+        if payload and isinstance(payload.get("messages"), list):
+            try:
+                history = messages_from_dict(payload["messages"])
+            except Exception as e:
+                logger.warning(f"Failed to deserialize conversation thread '{thread_id}': {e}")
+                history = []
+        else:
+            history = []
+        conversation_store[cache_key] = history
+        return history
+
+
+def _save_conversation_history(client_key: str, thread_id: str, messages: List[Any]) -> Dict[str, Any]:
+    path = _thread_file_path(client_key, thread_id)
+    existing = _load_thread_payload(client_key, thread_id) or {}
+    record = _conversation_record(thread_id, messages, created_at=existing.get("created_at"))
+    with conversation_history_lock:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2)
+        conversation_store[_thread_cache_key(client_key, thread_id)] = messages
+    return record
+
+
+def _list_conversation_records(client_key: str) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for path in glob.glob(os.path.join(_client_history_dir(client_key), "*.json")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict) or not payload.get("thread_id"):
+                continue
+            records.append({
+                "thread_id": payload.get("thread_id"),
+                "title": payload.get("title") or "New chat",
+                "preview": payload.get("preview") or "No messages yet",
+                "created_at": payload.get("created_at"),
+                "updated_at": payload.get("updated_at"),
+                "message_count": int(payload.get("message_count") or 0),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to read conversation summary from '{path}': {e}")
+    records.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    return records
+
+
+def _delete_conversation_history(client_key: str, thread_id: str) -> None:
+    path = _thread_file_path(client_key, thread_id)
+    with conversation_history_lock:
+        conversation_store.pop(_thread_cache_key(client_key, thread_id), None)
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def _set_client_profile(profile: str, request: Optional[Request] = None, client_key: Optional[str] = None) -> None:
@@ -409,6 +573,34 @@ def _maker_checker_should_gate(tool_name: str, mcp_server: Optional[str], active
     return not _is_checker_profile(effective_profile)
 
 
+def _load_maker_checker_requests() -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(MAKER_CHECKER_STATE_PATH):
+        return {}
+    try:
+        with open(MAKER_CHECKER_STATE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if isinstance(value, dict)
+        }
+    except Exception as e:
+        logger.warning(f"Failed to load maker-checker requests from '{MAKER_CHECKER_STATE_PATH}': {e}")
+        return {}
+
+
+def _save_maker_checker_requests() -> None:
+    with maker_checker_lock:
+        payload = json.loads(json.dumps(maker_checker_requests, default=str))
+    with open(MAKER_CHECKER_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+maker_checker_requests.update(_load_maker_checker_requests())
+
+
 def _create_maker_checker_request(
     run_id: str,
     thread_id: str,
@@ -453,6 +645,7 @@ def _create_maker_checker_request(
     item["plan_preview"] = _build_maker_checker_plan_preview(item)
     with maker_checker_lock:
         maker_checker_requests[request_id] = item
+    _save_maker_checker_requests()
     return item
 
 
@@ -575,13 +768,48 @@ def _audit_extract_details(tool_result: Dict[str, Any]) -> str:
     return "tool executed"
 
 
-def _collect_audit_entries(
-    cloud: Optional[str] = None,
-    status: Optional[str] = None,
-    action: Optional[str] = None,
-    user: Optional[str] = None,
-    limit: int = 500,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
+def _audit_entry_key(entry: Dict[str, Any]) -> str:
+    return "|".join([
+        str(entry.get("timestamp") or ""),
+        str(entry.get("run_id") or ""),
+        str(entry.get("thread_id") or ""),
+        str(entry.get("action") or ""),
+        str(entry.get("resource") or ""),
+        str(entry.get("status") or ""),
+    ])
+
+
+def _read_audit_ledger_entries() -> List[Dict[str, Any]]:
+    if not os.path.exists(AUDIT_LEDGER_PATH):
+        return []
+    entries: List[Dict[str, Any]] = []
+    with audit_ledger_lock:
+        try:
+            with open(AUDIT_LEDGER_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        entries.append(record)
+        except FileNotFoundError:
+            return []
+    return entries
+
+
+def _write_audit_ledger_entries(entries: List[Dict[str, Any]]) -> None:
+    ordered = sorted(entries, key=lambda x: x.get("timestamp") or "")
+    with audit_ledger_lock:
+        with open(AUDIT_LEDGER_PATH, "w", encoding="utf-8") as f:
+            for entry in ordered:
+                f.write(json.dumps(entry, default=str) + "\n")
+
+
+def _build_audit_entries_from_sources() -> List[Dict[str, Any]]:
     started_by_call: Dict[Tuple[str, str], Dict[str, Any]] = {}
     actor_by_run: Dict[str, str] = {}
     entries: List[Dict[str, Any]] = []
@@ -681,7 +909,27 @@ def _collect_audit_entries(
             "tool_args": item.get("tool_args", {}),
         })
 
-    entries.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+    return entries
+
+
+def _collect_audit_entries(
+    cloud: Optional[str] = None,
+    status: Optional[str] = None,
+    action: Optional[str] = None,
+    user: Optional[str] = None,
+    limit: int = 500,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
+    persisted_entries = _read_audit_ledger_entries()
+    live_entries = _build_audit_entries_from_sources()
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for entry in persisted_entries + live_entries:
+        merged[_audit_entry_key(entry)] = entry
+    all_entries = list(merged.values())
+    if len(all_entries) != len(persisted_entries):
+        _write_audit_ledger_entries(all_entries)
+
+    entries = sorted(all_entries, key=lambda x: x.get("timestamp") or "", reverse=True)
 
     def _match(v: Optional[str], expected: Optional[str]) -> bool:
         if not expected:
@@ -731,6 +979,60 @@ class RunRequest(BaseModel):
     model: Optional[str] = None
     credentialSource: Optional[str] = None
     mcpServer: Optional[str] = "none"
+
+
+class ConversationCreateRequest(BaseModel):
+    threadId: Optional[str] = None
+
+
+@app.get("/api/conversations")
+async def list_conversations(request: Request):
+    client_key = _client_key_from_request(request)
+    return JSONResponse({"conversations": _list_conversation_records(client_key)})
+
+
+@app.post("/api/conversations")
+async def create_conversation(request: Request, payload: Optional[ConversationCreateRequest] = None):
+    client_key = _client_key_from_request(request)
+    thread_id = (payload.threadId if payload and payload.threadId else str(uuid.uuid4()))
+    record = _save_conversation_history(client_key, thread_id, [])
+    return JSONResponse({
+        "thread_id": record["thread_id"],
+        "title": record["title"],
+        "preview": record["preview"],
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+        "message_count": record["message_count"],
+        "messages": [],
+    })
+
+
+@app.get("/api/conversations/{thread_id}")
+async def get_conversation(thread_id: str, request: Request):
+    client_key = _client_key_from_request(request)
+    payload = _load_thread_payload(client_key, thread_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages = _load_conversation_history(client_key, thread_id)
+    return JSONResponse({
+        "thread_id": thread_id,
+        "title": payload.get("title") or "New chat",
+        "preview": payload.get("preview") or "No messages yet",
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
+        "message_count": payload.get("message_count") or 0,
+        "messages": _visible_messages(messages),
+    })
+
+
+@app.delete("/api/conversations/{thread_id}")
+async def delete_conversation(thread_id: str, request: Request):
+    client_key = _client_key_from_request(request)
+    payload = _load_thread_payload(client_key, thread_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _delete_conversation_history(client_key, thread_id)
+    return JSONResponse({"success": True, "thread_id": thread_id})
 
 
 @app.get("/")
@@ -1031,6 +1333,7 @@ async def maker_checker_add_comment(request: Request, payload: MakerCheckerComme
         })
         item["updated_at"] = _utc_iso_now()
         updated = _maker_checker_copy(item)
+    _save_maker_checker_requests()
 
     workflow_event(
         workflow_logger,
@@ -1071,6 +1374,7 @@ async def approve_maker_checker_request(request: Request, payload: MakerCheckerD
                 "message": payload.notes,
             })
         updated = _maker_checker_copy(item)
+    _save_maker_checker_requests()
 
     workflow_event(
         workflow_logger,
@@ -1112,6 +1416,7 @@ async def reject_maker_checker_request(request: Request, payload: MakerCheckerDe
                 "message": payload.notes,
             })
         updated = _maker_checker_copy(item)
+    _save_maker_checker_requests()
 
     workflow_event(
         workflow_logger,
@@ -1144,6 +1449,7 @@ async def execute_maker_checker_request(request: Request, payload: MakerCheckerD
                 "author_role": role,
                 "message": payload.notes,
             })
+    _save_maker_checker_requests()
 
     selected_mcp = get_mcp_server(item.get("mcp_server"))
     if not selected_mcp:
@@ -1152,6 +1458,7 @@ async def execute_maker_checker_request(request: Request, payload: MakerCheckerD
             item["execution_error"] = f"MCP server '{item.get('mcp_server')}' not available."
             item["updated_at"] = _utc_iso_now()
             failed = _maker_checker_copy(item)
+        _save_maker_checker_requests()
         return JSONResponse({"success": False, "error": failed["execution_error"], "request": failed})
 
     previous_profile = _current_profile(request)
@@ -1177,6 +1484,7 @@ async def execute_maker_checker_request(request: Request, payload: MakerCheckerD
         if not result.get("success", False):
             item["execution_error"] = result.get("error") or "Execution failed."
         updated = _maker_checker_copy(item)
+    _save_maker_checker_requests()
 
     workflow_event(
         workflow_logger,
@@ -1392,6 +1700,7 @@ async def run_agent(payload: RunRequest, request: Request):
     run_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     thread_id = payload.threadId or str(uuid.uuid4())
+    client_key = _client_key_from_request(request)
     workflow_event(
         workflow_logger,
         "query_received",
@@ -1411,6 +1720,12 @@ async def run_agent(payload: RunRequest, request: Request):
 
     if is_audience_request(payload.message):
         response_text = build_audience_response()
+        history = _load_conversation_history(client_key, thread_id)
+        if not history:
+            history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
+        history.append(HumanMessage(content=payload.message))
+        history.append(AIMessage(content=response_text))
+        _save_conversation_history(client_key, thread_id, history)
         workflow_event(
             workflow_logger,
             "audience_request",
@@ -1470,6 +1785,12 @@ async def run_agent(payload: RunRequest, request: Request):
 
     if is_maker_checker_request(payload.message):
         response_text = build_maker_checker_response()
+        history = _load_conversation_history(client_key, thread_id)
+        if not history:
+            history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
+        history.append(HumanMessage(content=payload.message))
+        history.append(AIMessage(content=response_text))
+        _save_conversation_history(client_key, thread_id, history)
         workflow_event(
             workflow_logger,
             "maker_checker_request_explained",
@@ -1521,6 +1842,12 @@ async def run_agent(payload: RunRequest, request: Request):
 
     if is_out_of_scope_request(payload.message):
         response_text = build_out_of_scope_response()
+        history = _load_conversation_history(client_key, thread_id)
+        if not history:
+            history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
+        history.append(HumanMessage(content=payload.message))
+        history.append(AIMessage(content=response_text))
+        _save_conversation_history(client_key, thread_id, history)
         workflow_event(
             workflow_logger,
             "out_of_scope_request_blocked",
@@ -1573,6 +1900,12 @@ async def run_agent(payload: RunRequest, request: Request):
     if is_capabilities_request(payload.message):
         active_mcp = get_mcp_server(payload.mcpServer)
         response_text = build_capabilities_response(payload.mcpServer, active_mcp, payload.message)
+        history = _load_conversation_history(client_key, thread_id)
+        if not history:
+            history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
+        history.append(HumanMessage(content=payload.message))
+        history.append(AIMessage(content=response_text))
+        _save_conversation_history(client_key, thread_id, history)
         workflow_event(
             workflow_logger,
             "capabilities_request",
@@ -1630,7 +1963,7 @@ async def run_agent(payload: RunRequest, request: Request):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    history = conversation_store.setdefault(thread_id, [])
+    history = _load_conversation_history(client_key, thread_id)
     if not history:
         history.append(SystemMessage(content=EXECUTION_SYSTEM_PROMPT))
         logger.info(f"[{run_id}] System prompt initialized")
@@ -1641,6 +1974,7 @@ async def run_agent(payload: RunRequest, request: Request):
     else:
         # Update the existing last user message if it hasn't been answered yet
         history[-1].content = payload.message
+    _save_conversation_history(client_key, thread_id, history)
         
     logger.debug(f"Conversation history size: {len(history)} messages")
 
@@ -1719,9 +2053,11 @@ async def run_agent(payload: RunRequest, request: Request):
                         )
                         response = AIMessage(content="")
                         history.append(response)
+                        _save_conversation_history(client_key, thread_id, history)
                         break
                     raise
                 history.append(response)
+                _save_conversation_history(client_key, thread_id, history)
                 
                 # If there are tool calls, execute them
                 tool_calls = extract_tool_calls(response)
@@ -1816,6 +2152,7 @@ async def run_agent(payload: RunRequest, request: Request):
                                 }),
                                 tool_call_id=tool_call_id
                             ))
+                            _save_conversation_history(client_key, thread_id, history)
                             continue
 
                         if _maker_checker_should_gate(tool_name, payload.mcpServer, active_profile=active_profile):
@@ -1874,6 +2211,7 @@ async def run_agent(payload: RunRequest, request: Request):
                                 content=json.dumps(queued_result),
                                 tool_call_id=tool_call_id
                             ))
+                            _save_conversation_history(client_key, thread_id, history)
                             continue
                         
                         # Execute tool via MCP
@@ -1915,6 +2253,7 @@ async def run_agent(payload: RunRequest, request: Request):
                                     content=json.dumps(result),
                                     tool_call_id=tool_call_id
                                 ))
+                                _save_conversation_history(client_key, thread_id, history)
                             except Exception as tool_err:
                                 logger.error(f"[{run_id}] Tool execution error: {tool_err}")
                                 workflow_event(
@@ -1932,11 +2271,13 @@ async def run_agent(payload: RunRequest, request: Request):
                                     content=json.dumps({"success": False, "error": str(tool_err)}),
                                     tool_call_id=tool_call_id
                                 ))
+                                _save_conversation_history(client_key, thread_id, history)
                         else:
                             history.append(ToolMessage(
                                 content=json.dumps({"success": False, "error": f"MCP server {payload.mcpServer} not found"}),
                                 tool_call_id=tool_call_id
                             ))
+                            _save_conversation_history(client_key, thread_id, history)
                     
                     iteration += 1
                     continue # Re-invoke LLM with tool results
@@ -1953,6 +2294,10 @@ async def run_agent(payload: RunRequest, request: Request):
                 else:
                     logger.warning(f"[{run_id}] LLM returned empty response")
                     response_text = "No response generated."
+
+            if not isinstance(history[-1], AIMessage) or _message_text_content(history[-1].content) != response_text:
+                history.append(AIMessage(content=response_text))
+                _save_conversation_history(client_key, thread_id, history)
             
             logger.info(f"[{run_id}] Final response generated - Length: {len(response_text)} characters")
             logger.debug(f"[{run_id}] Updated conversation history size: {len(history)} messages")

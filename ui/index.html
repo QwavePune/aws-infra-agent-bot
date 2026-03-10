@@ -18,6 +18,7 @@
       </div>
       <div class="topbar-actions">
         <button id="navConsoleBtn" class="btn-secondary" style="display: none;">Console</button>
+        <button id="navFaqBtn" class="btn-secondary">FAQ & Prompts</button>
         <button id="navAuditBtn" class="btn-secondary">Audit Trail</button>
         <button id="awsLoginBtn" class="btn-primary">CLI Login</button>
         <button id="awsConsoleBtn" class="btn-secondary">AWS Console</button>
@@ -68,6 +69,12 @@
           <h3>Audit Trail</h3>
           <p class="rail-help">Review change history with filters for action, status, actor, and export logs.</p>
           <button type="button" class="btn-primary rail-audit-link" data-nav="audit">Open Audit Trail</button>
+        </section>
+
+        <section class="rail-card rail-faq-card">
+          <h3>FAQ and Prompts</h3>
+          <p class="rail-help">Browse supported questions, cost and inventory examples, MCP help, and maker-checker guidance.</p>
+          <button type="button" class="btn-secondary rail-faq-link" data-nav="faq">Open FAQ Page</button>
         </section>
       </aside>
 
@@ -206,7 +213,10 @@
       <section class="rail-card audit-table-card">
         <div class="audit-table-header">
           <h3>Audit Entries</h3>
-          <span id="entryCount" class="audit-count">Showing 0 entries</span>
+          <div class="audit-table-actions">
+            <span id="entryCount" class="audit-count">Showing 0 entries</span>
+            <button id="refreshAuditBtn" class="btn-secondary">Refresh</button>
+          </div>
         </div>
         <div class="audit-table-wrap">
           <table class="audit-table">
@@ -236,6 +246,132 @@
       <div class="topbar-actions">
         <button id="exportBtn" class="btn-primary">Export Audit Log</button>
       </div>
+    </main>
+
+    <main id="faqView" class="faq-layout hidden-view">
+      <section class="faq-hero">
+        <div>
+          <div class="faq-kicker">Agent Guide</div>
+          <h1>FAQ and Example Prompts</h1>
+          <p class="faq-lead">
+            Use this page to understand what the agent can answer, which questions work well, and how follow-up prompts should be phrased for inventory, cost, MCP, and maker-checker workflows.
+          </p>
+        </div>
+        <div class="faq-hero-actions">
+          <button type="button" class="btn-primary faq-action" data-faq-prompt="What can you do for me?">Try Capabilities</button>
+          <button type="button" class="btn-secondary faq-action" data-faq-prompt="Fetch me the total cost of all resources in my AWS account.">Try Cost Prompt</button>
+        </div>
+      </section>
+
+      <section class="faq-grid">
+        <article class="rail-card faq-card">
+          <h3>Recommended Questions</h3>
+          <div class="faq-question-list">
+            <button type="button" class="faq-question" data-faq-prompt="Fetch me the total cost of all resources in my AWS account.">
+              <span class="faq-question-number">1</span>
+              <span>Fetch me the total cost of all resources in my AWS account.</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="Can you produce an itemized breakup?">
+              <span class="faq-question-number">2</span>
+              <span>Can you produce an itemized breakup?</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="Please fetch me a list of all active resources on my account and group them per AWS region.">
+              <span class="faq-question-number">3</span>
+              <span>Please fetch me a list of all active resources on my account and group them per AWS region.</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="Are there any ECR or ECS resources on my account in region ap-south-1?">
+              <span class="faq-question-number">4</span>
+              <span>Are there any ECR or ECS resources on my account in region ap-south-1?</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="What can you do for me?">
+              <span class="faq-question-number">5</span>
+              <span>What can you do for me?</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="What are your capabilities?">
+              <span class="faq-question-number">6</span>
+              <span>What are your capabilities?</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="Give me a list of all MCP tools that are active for this agent.">
+              <span class="faq-question-number">7</span>
+              <span>Give me a list of all MCP tools that are active for this agent.</span>
+            </button>
+            <button type="button" class="faq-question" data-faq-prompt="How does maker-checker workflow work?">
+              <span class="faq-question-number">8</span>
+              <span>How does maker-checker workflow work?</span>
+            </button>
+          </div>
+        </article>
+
+        <article class="rail-card faq-card">
+          <h3>Cost and Inventory FAQ</h3>
+          <div class="faq-entry">
+            <h4>How do I ask for total AWS cost?</h4>
+            <p>Use direct billing language. Example: <code>Fetch me the total cost of all resources in my AWS account.</code></p>
+          </div>
+          <div class="faq-entry">
+            <h4>How do I ask for service-level cost detail?</h4>
+            <p>Ask a follow-up like <code>Can you produce an itemized breakup?</code> after the total is returned.</p>
+          </div>
+          <div class="faq-entry">
+            <h4>How do I ask for region-wise inventory?</h4>
+            <p>Use <code>Please fetch me a list of all active resources on my account and group them per AWS region.</code></p>
+          </div>
+          <div class="faq-entry">
+            <h4>Can I drill into one region?</h4>
+            <p>Yes. Example: <code>Are there any ECR or ECS resources on my account in region ap-south-1?</code></p>
+          </div>
+        </article>
+
+        <article class="rail-card faq-card">
+          <h3>Capabilities and MCP FAQ</h3>
+          <div class="faq-entry">
+            <h4>How do I ask what the agent can do?</h4>
+            <p>Try <code>What can you do for me?</code> or <code>What are your capabilities?</code></p>
+          </div>
+          <div class="faq-entry">
+            <h4>How do I inspect the active MCP tool surface?</h4>
+            <p>Use <code>Give me a list of all MCP tools that are active for this agent.</code></p>
+          </div>
+          <div class="faq-entry">
+            <h4>Can the answer change by selected MCP server?</h4>
+            <p>Yes. The available tools depend on the MCP server selected in the Runtime panel.</p>
+          </div>
+        </article>
+
+        <article class="rail-card faq-card">
+          <h3>Maker-Checker FAQ</h3>
+          <div class="faq-entry">
+            <h4>How do I ask about approvals?</h4>
+            <p>Use <code>How does maker-checker workflow work?</code></p>
+          </div>
+          <div class="faq-entry">
+            <h4>When is approval required?</h4>
+            <p>Mutating AWS actions can be queued for approval based on the active profile and current checker configuration.</p>
+          </div>
+          <div class="faq-entry">
+            <h4>What happens after approval?</h4>
+            <p>The queued tool call is executed with the approved arguments. Approval does not regenerate the request from scratch.</p>
+          </div>
+        </article>
+
+        <article class="rail-card faq-card faq-card-wide">
+          <h3>Prompting Tips</h3>
+          <div class="faq-tip-grid">
+            <div class="faq-tip">
+              <h4>Be explicit about scope</h4>
+              <p>Say <code>all resources</code>, <code>per region</code>, or the exact region name when you want precise inventory results.</p>
+            </div>
+            <div class="faq-tip">
+              <h4>Use follow-up prompts naturally</h4>
+              <p>Once the agent returns a summary, ask for a breakup, filter, or region-specific deep dive in the next message.</p>
+            </div>
+            <div class="faq-tip">
+              <h4>Ask capabilities before mutation</h4>
+              <p>If you are unsure which tools are active, ask for capabilities or MCP tools first, then request the operation.</p>
+            </div>
+          </div>
+        </article>
+      </section>
     </main>
   </div>
 

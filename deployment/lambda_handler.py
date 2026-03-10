@@ -43,6 +43,10 @@ try:
         build_capabilities_response,
         is_audience_request,
         build_audience_response,
+        is_maker_checker_request,
+        build_maker_checker_response,
+        is_out_of_scope_request,
+        build_out_of_scope_response,
     )
 except ImportError:
     logger.error("Failed to import core.llm_config")
@@ -92,6 +96,30 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         if is_audience_request(query):
             response_text = build_audience_response()
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'is_real_deploy': False,
+                    'tool_usage': False
+                }),
+                'response': response_text,
+                'conversation_history': conversation_history
+            }
+
+        if is_maker_checker_request(query):
+            response_text = build_maker_checker_response()
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'is_real_deploy': False,
+                    'tool_usage': False
+                }),
+                'response': response_text,
+                'conversation_history': conversation_history
+            }
+
+        if is_out_of_scope_request(query):
+            response_text = build_out_of_scope_response()
             return {
                 'statusCode': 200,
                 'body': json.dumps({

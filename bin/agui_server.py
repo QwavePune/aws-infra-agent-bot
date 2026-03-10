@@ -49,6 +49,10 @@ from core.capabilities import (
     build_capabilities_response,
     is_audience_request,
     build_audience_response,
+    is_maker_checker_request,
+    build_maker_checker_response,
+    is_out_of_scope_request,
+    build_out_of_scope_response,
 )
 from core.intent_policy import detect_read_only_intent, is_mutating_tool
 from core.architecture_parser import ArchitectureParser
@@ -1460,6 +1464,108 @@ async def run_agent(payload: RunRequest, request: Request):
 
         return StreamingResponse(
             stream_capabilities(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if is_maker_checker_request(payload.message):
+        response_text = build_maker_checker_response()
+        workflow_event(
+            workflow_logger,
+            "maker_checker_request_explained",
+            source="agui",
+            run_id=run_id,
+            thread_id=thread_id,
+            metadata={"class": "FastAPI", "method": "run_agent"},
+        )
+
+        def stream_maker_checker():
+            yield sse_event({
+                "type": "RUN_STARTED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_START",
+                "messageId": message_id,
+                "role": "assistant",
+                "timestamp": now_ms(),
+            })
+            chunk_size = 100
+            for idx in range(0, len(response_text), chunk_size):
+                chunk = response_text[idx: idx + chunk_size]
+                yield sse_event({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": chunk,
+                    "timestamp": now_ms(),
+                })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_END",
+                "messageId": message_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "RUN_FINISHED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+
+        return StreamingResponse(
+            stream_maker_checker(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if is_out_of_scope_request(payload.message):
+        response_text = build_out_of_scope_response()
+        workflow_event(
+            workflow_logger,
+            "out_of_scope_request_blocked",
+            source="agui",
+            run_id=run_id,
+            thread_id=thread_id,
+            metadata={"class": "FastAPI", "method": "run_agent"},
+        )
+
+        def stream_out_of_scope():
+            yield sse_event({
+                "type": "RUN_STARTED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_START",
+                "messageId": message_id,
+                "role": "assistant",
+                "timestamp": now_ms(),
+            })
+            chunk_size = 100
+            for idx in range(0, len(response_text), chunk_size):
+                chunk = response_text[idx: idx + chunk_size]
+                yield sse_event({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": chunk,
+                    "timestamp": now_ms(),
+                })
+            yield sse_event({
+                "type": "TEXT_MESSAGE_END",
+                "messageId": message_id,
+                "timestamp": now_ms(),
+            })
+            yield sse_event({
+                "type": "RUN_FINISHED",
+                "runId": run_id,
+                "threadId": thread_id,
+                "timestamp": now_ms(),
+            })
+
+        return StreamingResponse(
+            stream_out_of_scope(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

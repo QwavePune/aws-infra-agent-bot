@@ -15,8 +15,10 @@ const latencyLabel = document.getElementById("latencyLabel");
 const capabilitiesContent = document.getElementById("capabilitiesContent");
 const consoleView = document.getElementById("consoleView");
 const auditView = document.getElementById("auditView");
+const faqView = document.getElementById("faqView");
 const navAuditBtn = document.getElementById("navAuditBtn");
 const navConsoleBtn = document.getElementById("navConsoleBtn");
+const navFaqBtn = document.getElementById("navFaqBtn");
 const mcFlowSteps = document.getElementById("mcFlowSteps");
 const mcTotalItems = document.getElementById("mcTotalItems");
 const mcProfileLabel = document.getElementById("mcProfileLabel");
@@ -217,34 +219,49 @@ const setMakerCheckerFlow = (workflow) => {
   });
 };
 
-const setView = (view, updateHash = true) => {
-  currentView = view === "audit" ? "audit" : "console";
+const setComposerPrompt = (prompt, focus = true) => {
+  if (!promptInput) return;
+  promptInput.value = prompt || "";
+  promptInput.style.height = "auto";
+  promptInput.style.height = `${promptInput.scrollHeight}px`;
+  if (focus) promptInput.focus();
+};
 
-  if (consoleView && auditView) {
+const setView = (view, updateHash = true) => {
+  currentView = view === "audit" ? "audit" : view === "faq" ? "faq" : "console";
+
+  if (consoleView && auditView && faqView) {
     consoleView.classList.toggle("hidden-view", currentView !== "console");
     auditView.classList.toggle("hidden-view", currentView !== "audit");
+    faqView.classList.toggle("hidden-view", currentView !== "faq");
   }
 
   if (navAuditBtn) navAuditBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
-  if (navConsoleBtn) navConsoleBtn.style.display = currentView === "audit" ? "inline-flex" : "none";
-  if (awsLoginBtn) awsLoginBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
-  if (awsConsoleBtn) awsConsoleBtn.style.display = currentView === "audit" ? "none" : "inline-flex";
+  if (navFaqBtn) navFaqBtn.style.display = currentView === "faq" ? "none" : "inline-flex";
+  if (navConsoleBtn) navConsoleBtn.style.display = currentView === "console" ? "none" : "inline-flex";
+  if (awsLoginBtn) awsLoginBtn.style.display = currentView === "console" ? "inline-flex" : "none";
+  if (awsConsoleBtn) awsConsoleBtn.style.display = currentView === "console" ? "inline-flex" : "none";
 
   if (brandMark && brandSub) {
     if (currentView === "audit") {
       brandMark.textContent = "Audit Trail";
       brandSub.textContent = "Operations Audit";
+    } else if (currentView === "faq") {
+      brandMark.textContent = "Agent FAQ";
+      brandSub.textContent = "Prompt Library";
     } else {
       applyCloudContext();
     }
   }
 
   if (updateHash) {
-    const nextHash = currentView === "audit" ? "#audit" : "#console";
+    const nextHash = currentView === "audit" ? "#audit" : currentView === "faq" ? "#faq" : "#console";
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
   }
+
+  window.dispatchEvent(new CustomEvent("agui:viewchange", { detail: { view: currentView } }));
 };
 
 const escapeHtml = (value) =>
@@ -639,10 +656,7 @@ const renderQuickActions = (items) => {
     button.addEventListener("click", () => {
       const prompt = button.dataset.prompt || "";
       if (!prompt) return;
-      promptInput.value = prompt;
-      promptInput.style.height = "auto";
-      promptInput.style.height = `${promptInput.scrollHeight}px`;
-      promptInput.focus();
+      setComposerPrompt(prompt);
     });
     quickActions.appendChild(button);
   });
@@ -1449,6 +1463,10 @@ if (navAuditBtn) {
   navAuditBtn.addEventListener("click", () => setView("audit"));
 }
 
+if (navFaqBtn) {
+  navFaqBtn.addEventListener("click", () => setView("faq"));
+}
+
 if (navConsoleBtn) {
   navConsoleBtn.addEventListener("click", () => setView("console"));
 }
@@ -1460,9 +1478,27 @@ document.querySelectorAll('[data-nav="audit"]').forEach((el) => {
   });
 });
 
+document.querySelectorAll('[data-nav="faq"]').forEach((el) => {
+  el.addEventListener("click", (event) => {
+    event.preventDefault();
+    setView("faq");
+  });
+});
+
+document.querySelectorAll("[data-faq-prompt]").forEach((el) => {
+  el.addEventListener("click", () => {
+    const prompt = el.getAttribute("data-faq-prompt") || "";
+    if (!prompt) return;
+    setView("console");
+    setComposerPrompt(prompt);
+  });
+});
+
 window.addEventListener("hashchange", () => {
   if (window.location.hash === "#audit") {
     setView("audit", false);
+  } else if (window.location.hash === "#faq") {
+    setView("faq", false);
   } else {
     setView("console", false);
   }
@@ -1476,6 +1512,8 @@ loadCapabilities();
 refreshMakerCheckerQueue();
 if (window.location.hash === "#audit") {
   setView("audit", false);
+} else if (window.location.hash === "#faq") {
+  setView("faq", false);
 } else {
   setView("console", false);
 }

@@ -2,6 +2,7 @@
 # Logs
 *.log
 .agent-session.log
+*.jsonl*
 
 # Virtualenv
 venv/

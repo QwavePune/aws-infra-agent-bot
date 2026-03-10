@@ -9,6 +9,10 @@ CAPABILITY_PHRASES = (
     "capabilities",
     "help me with",
     "how can you help",
+    "list of all mcp tools",
+    "active mcp tools",
+    "which mcp tools",
+    "what mcp tools",
 )
 
 AUDIENCE_PHRASES = (
@@ -19,6 +23,41 @@ AUDIENCE_PHRASES = (
     "intended audience",
     "target audience",
     "who is this for",
+)
+
+MAKER_CHECKER_PHRASES = (
+    "maker-checker",
+    "maker checker",
+    "approval workflow",
+    "approval flow",
+)
+
+DOMAIN_KEYWORDS = (
+    "aws",
+    "terraform",
+    "mcp",
+    "agent",
+    "infra",
+    "infrastructure",
+    "inventory",
+    "resource",
+    "resources",
+    "cost",
+    "billing",
+    "region",
+    "regions",
+    "ec2",
+    "ecs",
+    "ecr",
+    "s3",
+    "rds",
+    "lambda",
+    "vpc",
+    "iam",
+    "maker-checker",
+    "maker checker",
+    "approval",
+    "cloud",
 )
 
 
@@ -34,6 +73,30 @@ def is_audience_request(message: str) -> bool:
     return any(phrase in text for phrase in AUDIENCE_PHRASES)
 
 
+def is_maker_checker_request(message: str) -> bool:
+    """Return True when the user asks how approvals/maker-checker works."""
+    text = (message or "").strip().lower()
+    return any(phrase in text for phrase in MAKER_CHECKER_PHRASES)
+
+
+def is_infrastructure_domain_request(message: str) -> bool:
+    """Return True when a message appears related to this agent's AWS/infra scope."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in DOMAIN_KEYWORDS)
+
+
+def is_out_of_scope_request(message: str) -> bool:
+    """Return True for general off-topic questions outside this agent's scope."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    if is_capabilities_request(text) or is_audience_request(text) or is_maker_checker_request(text):
+        return False
+    return not is_infrastructure_domain_request(text)
+
+
 def build_audience_response() -> str:
     """Build a standard response for audience/intended-user questions."""
     return (
@@ -42,6 +105,27 @@ def build_audience_response() -> str:
         "- Cloud engineers and infrastructure developers\n"
         "- Teams that manage AWS resources using Terraform workflows\n\n"
         "It is most useful for users who want guided infrastructure planning, validation, and execution."
+    )
+
+
+def build_maker_checker_response() -> str:
+    """Build a standard response describing the AGUI maker-checker workflow."""
+    return (
+        "The maker-checker workflow is the approval gate for mutating AWS actions in this agent.\n"
+        "- A maker can request a change, but selected mutating actions may be queued instead of executed immediately.\n"
+        "- A checker reviews the queued request, comments on it, and approves or rejects it.\n"
+        "- After approval, the exact queued tool call is executed with the stored arguments.\n"
+        "- The flow is visible in the AGUI maker-checker panel and the audit trail.\n\n"
+        "In practice, read-only questions run directly. Mutating AWS actions can require approval depending on the active profile and checker configuration."
+    )
+
+
+def build_out_of_scope_response() -> str:
+    """Build a standard response for unrelated/non-agent questions."""
+    return (
+        "I am scoped to this infrastructure agent's domain.\n"
+        "Ask me about AWS inventory, billing, regions, active MCP tools, Terraform workflows, identity, or maker-checker approvals.\n"
+        "I should not answer unrelated general-knowledge questions in this console."
     )
 
 

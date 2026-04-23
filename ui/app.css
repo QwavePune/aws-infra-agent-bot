@@ -113,10 +113,6 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
-.capabilities-card {
-  overflow: hidden;
-}
-
 .capabilities-content {
   overflow-y: auto;
   max-height: 42vh;
@@ -182,11 +178,11 @@ body {
 }
 
 .conversation-list {
-  margin-top: 12px;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 40vh;
+  max-height: 62vh;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -204,11 +200,11 @@ body {
 .conversation-item {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--panel-soft);
-  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 9px 10px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   text-align: left;
   cursor: pointer;
@@ -239,25 +235,6 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.conversation-item-preview {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.conversation-item-meta {
-  margin-top: 7px;
-  font-size: 11px;
-  color: #6d7a92;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .conversation-delete {
@@ -861,18 +838,6 @@ body {
 .btn-secondary:hover {
   transform: translateY(-1px);
   opacity: 0.95;
-}
-
-.rail-audit-card .rail-help {
-  margin-top: 0;
-  margin-bottom: 10px;
-}
-
-.rail-audit-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
 }
 
 .audit-table-actions {

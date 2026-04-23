@@ -326,6 +326,62 @@ def _conversation_record(thread_id: str, messages: List[Any], created_at: Option
     }
 
 
+def _build_read_only_tool_summary(tool_name: str, result: Dict[str, Any]) -> str:
+    if not isinstance(result, dict) or not result.get("success"):
+        return ""
+
+    if tool_name == "list_aws_resources":
+        resource_type = str(result.get("resource_type") or "resource").upper()
+        region = result.get("region")
+        count = int(result.get("count") or 0)
+        items = result.get("items") or []
+
+        location = f" in region {region}" if region else ""
+        if count == 0:
+            return f"No {resource_type} resources were found{location}."
+
+        page = items[:20]
+        lines = [f"I found {count} {resource_type} resource{'s' if count != 1 else ''}{location}:"]
+        for item in page:
+            if resource_type == "ECR":
+                # Include repository_uri — the generic fallback below only captures the name.
+                name = item.get("repository_name") or "unknown"
+                uri = item.get("repository_uri") or ""
+                lines.append(f"- {name}" + (f" ({uri})" if uri else ""))
+                continue
+            label = (
+                item.get("name")
+                or item.get("cluster_name")
+                or item.get("function_name")
+                or item.get("db_identifier")
+                or item.get("vpc_id")
+                or item.get("instance_id")
+                or item.get("repository_name")
+                or str(item)
+            )
+            lines.append(f"- {label}")
+        if count > len(page):
+            lines.append(f"...and {count - len(page)} more.")
+        return "\n".join(lines)
+
+    if tool_name == "list_account_inventory":
+        summary = result.get("summary") or {}
+        if not isinstance(summary, dict):
+            return ""
+        parts = [f"{key.upper()}: {value}" for key, value in summary.items() if isinstance(value, int)]
+        return "Here is the current account inventory summary:\n" + "\n".join(f"- {part}" for part in parts)
+
+    if tool_name == "get_cost_explorer_summary":
+        total_cost = (result.get("total_cost") or {})
+        amount = total_cost.get("amount")
+        currency = total_cost.get("currency") or "USD"
+        if amount is None:
+            return ""
+        return f"Your current AWS total cost for the selected window is {amount} {currency}."
+
+    return ""
+
+
 def _load_thread_payload(client_key: str, thread_id: str) -> Optional[Dict[str, Any]]:
     path = _thread_file_path(client_key, thread_id)
     if not os.path.exists(path):
@@ -1057,7 +1113,7 @@ async def list_models():
                 "key": key,
                 "name": config["name"],
                 "default_model": config["default_model"],
-                "models": [config["default_model"]],
+                "models": config.get("models", [config["default_model"]]),
             }
         )
     logger.info(f"Returning {len(providers)} LLM providers")
@@ -2025,6 +2081,8 @@ async def run_agent(payload: RunRequest, request: Request):
             iteration = 0
             forced_followup_text = ""
             last_successful_plan_project: Optional[str] = None
+            last_tool_name: Optional[str] = None
+            last_tool_result: Optional[Dict[str, Any]] = None
             while iteration < max_iterations:
                 workflow_event(
                     workflow_logger,
@@ -2224,6 +2282,8 @@ async def run_agent(payload: RunRequest, request: Request):
                                     planned_project = (tool_args or {}).get("project_name")
                                     if planned_project:
                                         last_successful_plan_project = planned_project
+                                last_tool_name = tool_name
+                                last_tool_result = result
                                 workflow_event(
                                     workflow_logger,
                                     "tool_execution_completed",
@@ -2290,7 +2350,14 @@ async def run_agent(payload: RunRequest, request: Request):
                 response_text = forced_followup_text
             if not response_text.strip():
                 if hasattr(response, "tool_calls") and response.tool_calls:
-                    response_text = "I have initiated the infrastructure changes as requested."
+                    if read_only_intent:
+                        response_text = _build_read_only_tool_summary(last_tool_name or "", last_tool_result or {})
+                    if not response_text:
+                        response_text = (
+                            "I retrieved the requested AWS information."
+                            if read_only_intent
+                            else "I have initiated the infrastructure changes as requested."
+                        )
                 else:
                     logger.warning(f"[{run_id}] LLM returned empty response")
                     response_text = "No response generated."

@@ -12,7 +12,6 @@ const modelSelect = document.getElementById("modelSelect");
 const mcpSelect = document.getElementById("mcpSelect");
 const providerLabel = document.getElementById("providerLabel");
 const latencyLabel = document.getElementById("latencyLabel");
-const capabilitiesContent = document.getElementById("capabilitiesContent");
 const consoleView = document.getElementById("consoleView");
 const auditView = document.getElementById("auditView");
 const faqView = document.getElementById("faqView");
@@ -373,15 +372,10 @@ const renderConversationList = () => {
     .map((item) => {
       const isActive = item.thread_id === threadId;
       const title = escapeHtml(item.title || "New chat");
-      const preview = escapeHtml(item.preview || "No messages yet");
-      const stamp = escapeHtml(formatConversationTimestamp(item.updated_at || item.created_at));
-      const count = Number(item.message_count || 0);
       return `
         <button type="button" class="conversation-item${isActive ? " active" : ""}" data-thread-id="${escapeHtml(item.thread_id)}">
           <div class="conversation-item-main">
             <div class="conversation-item-title">${title}</div>
-            <div class="conversation-item-preview">${preview}</div>
-            <div class="conversation-item-meta">${count} messages${stamp ? ` • ${stamp}` : ""}</div>
           </div>
           <span class="conversation-delete" data-delete-thread="${escapeHtml(item.thread_id)}" title="Delete conversation">×</span>
         </button>
@@ -893,177 +887,6 @@ if (toolOutputSelect) {
   });
 }
 
-const categorizeTools = (tools, cloud) => {
-  const dedupedMap = new Map();
-  (tools || []).forEach((tool) => {
-    const name = (tool.name || "").trim();
-    if (!name) return;
-    const existing = dedupedMap.get(name);
-    if (!existing) {
-      dedupedMap.set(name, tool);
-      return;
-    }
-    const currentDesc = String(tool.description || "");
-    const existingDesc = String(existing.description || "");
-    if (currentDesc.length > existingDesc.length) {
-      dedupedMap.set(name, tool);
-    }
-  });
-
-  const groups = {
-    discovery: [],
-    automation: [],
-    terraform: [],
-    identity: [],
-    workflow: [],
-    other: [],
-  };
-
-  [...dedupedMap.values()].forEach((tool) => {
-    const name = (tool.name || "").trim();
-
-    if (
-      name === "list_account_inventory" ||
-      name === "list_aws_resources" ||
-      name === "describe_resource" ||
-      name === "list_azure_resources"
-    ) {
-      groups.discovery.push(tool);
-      return;
-    }
-    if (name.startsWith("terraform_") || name === "get_infrastructure_state") {
-      groups.terraform.push(tool);
-      return;
-    }
-    if (name === "get_user_permissions" || name === "get_azure_subscription_context") {
-      groups.identity.push(tool);
-      return;
-    }
-    if (name.startsWith("start_") || name.startsWith("update_") || name.startsWith("review_")) {
-      groups.workflow.push(tool);
-      return;
-    }
-    if (name.startsWith("create_")) {
-      groups.automation.push(tool);
-      return;
-    }
-
-    if (cloud === CLOUD_AZURE && (name.includes("azure") || name.includes("resource"))) {
-      groups.automation.push(tool);
-      return;
-    }
-
-    groups.other.push(tool);
-  });
-
-  return groups;
-};
-
-const renderCapabilities = (tools) => {
-  if (!capabilitiesContent) return;
-
-  const cloud = cloudForCapabilities();
-  const groups = categorizeTools(tools || [], cloud);
-  const cards = [];
-
-  if (groups.discovery.length > 0) {
-    cards.push({
-      title: "Discovery & Inventory",
-      description:
-        cloud === CLOUD_AZURE
-          ? "List available Azure resources and inspect discovery options."
-          : "Account-wide listing and detailed resource lookups across regions.",
-      hint:
-        cloud === CLOUD_AZURE
-          ? "Ask: List all Azure resources available for build"
-          : "Ask: List all resources in my account",
-    });
-  }
-
-  if (groups.automation.length > 0) {
-    cards.push({
-      title: cloud === CLOUD_AZURE ? "Azure Infra Automation" : "AWS Infra Automation",
-      description:
-        cloud === CLOUD_AZURE
-          ? "Dummy Azure provisioning commands are exposed while real execution is under construction."
-          : "Provision and manage compute, storage, database, and networking resources.",
-      hint: cloud === CLOUD_AZURE ? "Ask: Create an Azure VM" : "Ask: Show ECS capabilities",
-    });
-  }
-
-  if (groups.terraform.length > 0) {
-    cards.push({
-      title: "Terraform Lifecycle",
-      description:
-        cloud === CLOUD_AZURE
-          ? "Preview terraform plan output for Azure. Apply/build is currently under construction."
-          : "Generic plan, apply, destroy, and state operations.",
-      hint: "Ask: Show Terraform capabilities",
-    });
-  }
-
-  if (groups.identity.length > 0) {
-    cards.push({
-      title: "Identity & Access",
-      description:
-        cloud === CLOUD_AZURE
-          ? "Subscription/identity context checks (dummy in this build)."
-          : "AWS identity checks and permissions context.",
-      hint: cloud === CLOUD_AZURE ? "Ask: Show Azure identity context" : "Ask: Show IAM capabilities",
-    });
-  }
-
-  if (groups.workflow.length > 0) {
-    cards.push({
-      title: "Guided Workflows",
-      description: "Multi-step orchestration with preflight validation gates.",
-      hint: "Ask: Show workflow capabilities",
-    });
-  }
-
-  if (cards.length === 0 && (tools || []).length > 0) {
-    (tools || []).forEach((tool) => {
-      cards.push({
-        title: tool.name || "Tool",
-        description: tool.description || "No description available.",
-        hint: "",
-      });
-    });
-  }
-
-  const rendered = cards
-    .map(
-      (item) =>
-        `<div class="cap-tool"><div class="cap-tool-name">${escapeHtml(item.title)}</div><div class="cap-tool-desc">${escapeHtml(item.description)}</div>${item.hint ? `<div class="cap-tool-hint">${escapeHtml(item.hint)}</div>` : ""}</div>`
-    )
-    .join("");
-
-  capabilitiesContent.innerHTML = rendered || "No capabilities available.";
-};
-
-const loadCapabilities = async () => {
-  if (!capabilitiesContent) return;
-  capabilitiesContent.textContent = "Loading capabilities...";
-
-  if (mcpSelect.value === "none") {
-    capabilitiesContent.textContent = "MCP disabled. Enable an MCP server to view executable capabilities.";
-    return;
-  }
-
-  try {
-    const serverName = encodeURIComponent(mcpSelect.value);
-    const response = await fetch(`/api/mcp/tools?mcpServer=${serverName}`);
-    if (!response.ok) {
-      throw new Error("Unable to fetch MCP tools");
-    }
-    const data = await response.json();
-    renderCapabilities(data.tools || []);
-  } catch (error) {
-    console.error("Failed to load capabilities", error);
-    capabilitiesContent.textContent = "Failed to load capabilities.";
-  }
-};
-
 const parseSse = async (response, onEvent) => {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -1533,7 +1356,6 @@ if (awsRunDiagnosticsBtn) {
 
 mcpSelect.addEventListener("change", () => {
   applyCloudContext();
-  loadCapabilities();
   refreshMakerCheckerQueue();
 });
 
@@ -1690,7 +1512,6 @@ setInterval(refreshAwsIdentity, 30000);
 const initializeApp = async () => {
   loadModels();
   applyCloudContext();
-  loadCapabilities();
   refreshMakerCheckerQueue();
 
   try {

@@ -32,7 +32,8 @@ class TestLLMConfig:
     def test_claude_provider_configured(self):
         """Test Claude provider is properly configured"""
         assert 'claude' in SUPPORTED_LLMS
-        assert SUPPORTED_LLMS['claude']['default_model'] == 'claude-3-5-sonnet-20241022'
+        assert SUPPORTED_LLMS['claude']['default_model'] == 'claude-opus-4-7'
+        assert 'claude-opus-4-7' in SUPPORTED_LLMS['claude']['models']
     
     def test_ollama_provider_no_api_key_required(self):
         """Test Ollama (local) doesn't require API key"""

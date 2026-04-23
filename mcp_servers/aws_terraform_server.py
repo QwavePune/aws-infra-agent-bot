@@ -275,7 +275,7 @@ class MCPAWSManagerServer:
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """List available MCP tools"""
-        return [
+        tools = [
             {
                 "name": "list_account_inventory",
                 "description": "Read-only. Summarize AWS resources in the account across regions.",
@@ -329,7 +329,7 @@ class MCPAWSManagerServer:
                     "properties": {
                         "resource_type": {
                             "type": "string",
-                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs"],
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs", "ecr"],
                             "description": "Resource type to list (required)."
                         },
                         "region": {
@@ -348,7 +348,7 @@ class MCPAWSManagerServer:
                     "properties": {
                         "resource_type": {
                             "type": "string",
-                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs"],
+                            "enum": ["ec2", "vpc", "rds", "lambda", "s3", "ecs", "ecr"],
                             "description": "Resource type (required)."
                         },
                         "resource_id": {
@@ -743,6 +743,18 @@ class MCPAWSManagerServer:
                 }
             }
         ]
+
+        # Some legacy tool definitions overlap with newer read-only inventory tools.
+        # Deduplicate by tool name so downstream LLM tool binding remains valid.
+        deduped_tools: List[Dict[str, Any]] = []
+        seen_names = set()
+        for tool in tools:
+            name = tool.get("name")
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            deduped_tools.append(tool)
+        return deduped_tools
     
     def _list_aws_resources(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """List AWS resources by type"""
@@ -1563,6 +1575,21 @@ class MCPAWSManagerServer:
                             "active_services_count": c.get("activeServicesCount"),
                         })
                 return {"success": True, "resource_type": "ecs", "region": region, "count": len(clusters), "items": clusters}
+
+            if resource_type == "ecr":
+                ecr = boto3.client("ecr", region_name=region)
+                repositories = []
+                paginator = ecr.get_paginator("describe_repositories")
+                for page in paginator.paginate():
+                    for repo in page.get("repositories", []):
+                        repositories.append({
+                            "repository_name": repo.get("repositoryName"),
+                            "repository_uri": repo.get("repositoryUri"),
+                            "arn": repo.get("repositoryArn"),
+                            "created_at": str(repo.get("createdAt")),
+                            "image_tag_mutability": repo.get("imageTagMutability"),
+                        })
+                return {"success": True, "resource_type": "ecr", "region": region, "count": len(repositories), "items": repositories}
 
             return {"success": False, "error": f"Unsupported resource_type '{resource_type}'"}
         except Exception as e:

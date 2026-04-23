@@ -20,6 +20,11 @@ def test_ecs_workflow_tools_are_exposed(server):
     assert "create_ecs_service" in names
 
 
+def test_list_tools_names_are_unique(server):
+    names = [tool["name"] for tool in server.list_tools()]
+    assert len(names) == len(set(names))
+
+
 def test_start_update_review_ecs_workflow(server):
     server._validate_ecs_prereqs = lambda config: {"valid": True, "errors": [], "warnings": [], "details": {}, "remediation": []}
     started = server.execute_tool(

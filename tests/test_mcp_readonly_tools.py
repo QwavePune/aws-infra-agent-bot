@@ -123,3 +123,34 @@ def test_cost_summary_uses_group_totals_when_total_is_empty(server, monkeypatch)
     assert result["success"] is True
     assert result["total_cost"]["amount"] == 0.89
     assert result["service_count"] == 2
+
+
+def test_list_aws_resources_ecr_with_mocked_boto(server, monkeypatch):
+    fake_ecr = MagicMock()
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {
+            "repositories": [
+                {
+                    "repositoryName": "langchain-agent",
+                    "repositoryUri": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/langchain-agent",
+                    "repositoryArn": "arn:aws:ecr:ap-south-1:123456789012:repository/langchain-agent",
+                    "createdAt": "2026-03-12T10:00:00Z",
+                    "imageTagMutability": "MUTABLE",
+                }
+            ]
+        }
+    ]
+    fake_ecr.get_paginator.return_value = fake_paginator
+
+    def fake_client(service_name, region_name=None):
+        assert service_name == "ecr"
+        assert region_name == "ap-south-1"
+        return fake_ecr
+
+    monkeypatch.setattr("mcp_servers.aws_terraform_server.boto3.client", fake_client)
+    result = server._list_aws_resources({"resource_type": "ecr", "region": "ap-south-1"})
+    assert result["success"] is True
+    assert result["resource_type"] == "ecr"
+    assert result["count"] == 1
+    assert result["items"][0]["repository_name"] == "langchain-agent"

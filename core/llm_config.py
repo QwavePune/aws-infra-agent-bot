@@ -46,7 +46,10 @@ SUPPORTED_LLMS = {
         "name": "Anthropic Claude",
         "package": "langchain_anthropic",
         "class": "ChatAnthropic",
-        "default_model": "claude-3-5-sonnet-20241022",
+        "default_model": "claude-opus-4-7",
+        "models": [
+            "claude-opus-4-7",
+        ],
         "requires_api_key": True,
         "env_var": "ANTHROPIC_API_KEY",
     },
